@@ -77,9 +77,19 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := s.migrateLimits(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate limits: %w", err)
+	}
 
 	return s, nil
 }
+
+// DB exposes the underlying *sql.DB for read-only callers (e.g. token aggregation handlers).
+func (s *Store) DB() *sql.DB { return s.db }
+
+// Path returns the on-disk path of this store.
+func (s *Store) Path() string { return s.path }
 
 // Close closes the store.
 func (s *Store) Close() error {

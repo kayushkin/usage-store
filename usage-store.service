@@ -1,0 +1,12 @@
+[Unit]
+Description=usage-store — token + subscription-limit aggregator
+After=network.target
+
+[Service]
+ExecStart=/home/kayushkincom/bin/usage-store-server
+Restart=on-failure
+RestartSec=3
+Environment=USAGE_STORE_LISTEN_ADDR=:8185
+
+[Install]
+WantedBy=default.target
