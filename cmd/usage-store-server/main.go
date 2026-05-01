@@ -82,7 +82,9 @@ func buildSpendCollectors(cfg config.Config) server.SpendCollectors {
 		return out
 	}
 
-	anthropicAdminID := findAdminCredID(asClient, creds, "anthropic", "sk-ant-admin-")
+	// Anthropic admin keys are formatted "sk-ant-admin01-..." (no dash after
+	// "admin"); OpenAI uses "sk-admin-...". Match the common prefix.
+	anthropicAdminID := findAdminCredID(asClient, creds, "anthropic", "sk-ant-admin")
 	if anthropicAdminID != "" {
 		log.Printf("[spend] anthropic admin credential discovered: %s", anthropicAdminID)
 		out.Anthropic = spend.NewAnthropicKey(func() (string, error) {
