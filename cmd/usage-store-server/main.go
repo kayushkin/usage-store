@@ -39,7 +39,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runRefresher(ctx, store, ant, cx, cfg.RefreshInterval)
-	go runSpendRefresher(ctx, store, sc, cfg.SpendRefreshInterval)
+	go runSpendRefresher(ctx, store, srv, sc, cfg.SpendRefreshInterval)
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
 
@@ -160,21 +160,29 @@ func runRefresher(ctx context.Context, s *usagestore.Store, ant *anthropic.Colle
 
 // runSpendRefresher polls each configured provider's per-key spend on a
 // longer cadence (default 1h). Failures are logged but never stop the loop.
-func runSpendRefresher(ctx context.Context, s *usagestore.Store, sc server.SpendCollectors, interval time.Duration) {
+// Admin-key hints are forwarded to the server so /spend/keys can render the
+// parent row even before the UI's first /spend/refresh round-trip.
+func runSpendRefresher(ctx context.Context, s *usagestore.Store, srv *server.Server, sc server.SpendCollectors, interval time.Duration) {
 	if sc.Anthropic == nil {
 		return
 	}
 	tick := func() {
-		snaps, err := sc.Anthropic.Fetch()
+		res, err := sc.Anthropic.Fetch()
 		if err != nil {
 			log.Printf("[spend-refresh] anthropic: %v", err)
 			return
 		}
-		for _, snap := range snaps {
-			if err := s.SaveKeySpend(snap); err != nil {
-				log.Printf("[spend-refresh] save %s: %v", snap.APIKeyID, err)
+		for _, m := range res.Keys {
+			if err := s.SaveKeyMeta(m); err != nil {
+				log.Printf("[spend-refresh] save meta %s: %v", m.APIKeyID, err)
 			}
 		}
+		for _, d := range res.Daily {
+			if err := s.SaveDailySpend(d); err != nil {
+				log.Printf("[spend-refresh] save daily %s/%s: %v", d.APIKeyID, d.Date, err)
+			}
+		}
+		srv.SaveAdminHint("anthropic", res.AdminKeyHint)
 	}
 
 	tick()

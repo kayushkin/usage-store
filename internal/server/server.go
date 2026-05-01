@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	usagestore "github.com/kayushkin/usage-store"
 	"github.com/kayushkin/usage-store/anthropic"
@@ -24,6 +25,11 @@ type Server struct {
 	codex          *codex.Reader
 	spendAnthropic *spend.AnthropicKeyCollector // nil when no admin key was discovered
 	mux            *http.ServeMux
+
+	// Cached per-provider admin-key hint from the most recent spend fetch.
+	// Updated by SaveAdminHint; the server reads it when assembling the
+	// /spend/keys response. Empty until first fetch completes.
+	adminHints map[string]string
 }
 
 type SpendCollectors struct {
@@ -37,10 +43,17 @@ func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx 
 		anthropic:      ant,
 		codex:          cx,
 		spendAnthropic: sc.Anthropic,
+		adminHints:     map[string]string{},
 		mux:            http.NewServeMux(),
 	}
 	srv.routes()
 	return srv
+}
+
+// SaveAdminHint records the per-provider admin-key partial-hint discovered on
+// the latest fetch. Called by the spend refresher after a successful Fetch.
+func (s *Server) SaveAdminHint(provider, hint string) {
+	s.adminHints[provider] = hint
 }
 
 func (s *Server) routes() {
@@ -52,18 +65,25 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/usage/spend/keys", s.handleSpendKeys)
 	s.mux.HandleFunc("GET /api/usage/spend/keys/{provider}/{api_key_id}/raw", s.handleSpendKeyRaw)
 	s.mux.HandleFunc("POST /api/usage/spend/refresh", s.handleSpendRefresh)
+	s.mux.HandleFunc("GET /api/usage/spend/topups", s.handleListTopups)
+	s.mux.HandleFunc("POST /api/usage/spend/topups", s.handleAddTopup)
+	s.mux.HandleFunc("DELETE /api/usage/spend/topups/{id}", s.handleDeleteTopup)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
-// handleUsage returns token-usage aggregates over day/week/month windows.
-//
-// Mirrors the dash UI's existing /api/usage shape so we can swap dash to point
-// here without touching the React side.
+// ---- token-usage aggregates (legacy) ----
+
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	db, err := sql.Open("sqlite", s.tokensDBPath+"?mode=ro")
 	if err != nil {
@@ -119,7 +139,8 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLimits returns the latest snapshot for every known provider.
+// ---- subscription limits (legacy) ----
+
 func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request) {
 	out := map[string]*usagestore.ProviderLimits{}
 	for _, p := range []string{"anthropic", "codex"} {
@@ -178,10 +199,6 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rows)
 }
 
-// handleRefresh forces an out-of-band fetch for one provider.
-//
-// For anthropic this hits the upstream API. For codex this rescans the local
-// rollout directory (cheap; no network). Persists the result as a new snapshot.
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	switch provider {
@@ -216,47 +233,126 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ---- per-key spend + topups ----
+
 // SpendKeysResponse is the per-provider, per-key shape returned by
-// /api/usage/spend/keys. Keys are sorted by 30-day total descending.
+// /api/usage/spend/keys. Each provider has an Account header (admin/parent
+// row in the UI) plus per-key rows beneath. Window totals on KeyRow are
+// computed from spend_daily at read time.
 type SpendKeysResponse struct {
-	Anthropic ProviderKeys `json:"anthropic"`
-	OpenAI    ProviderKeys `json:"openai"`
+	Anthropic ProviderAccount `json:"anthropic"`
+	OpenAI    ProviderAccount `json:"openai"`
 }
 
-type ProviderKeys struct {
-	Configured bool                 `json:"configured"`
-	Keys       []usagestore.KeySpend `json:"keys"`
+type ProviderAccount struct {
+	Configured     bool       `json:"configured"`
+	AdminKeyHint   string     `json:"admin_key_hint"`
+	Total24h       float64    `json:"total_usd_24h"`
+	Total7d        float64    `json:"total_usd_7d"`
+	Total30d       float64    `json:"total_usd_30d"`
+	Topups         []usagestore.Topup `json:"topups"`
+	TopupsTotalUSD float64    `json:"topups_total_usd"`
+	SpendSinceBaseline float64 `json:"spend_since_baseline"`
+	RemainingUSD   *float64   `json:"remaining_usd"`  // nil when no top-ups
+	BalanceSince   *int64     `json:"balance_since"`  // unix sec; nil when no top-ups
+	Keys           []KeyRow   `json:"keys"`
+}
+
+type KeyRow struct {
+	APIKeyID     string  `json:"api_key_id"`
+	APIKeyName   string  `json:"api_key_name"`
+	APIKeyHint   string  `json:"api_key_hint"`
+	APIKeyStatus string  `json:"api_key_status"`
+	Total24h     float64 `json:"total_usd_24h"`
+	Total7d      float64 `json:"total_usd_7d"`
+	Total30d     float64 `json:"total_usd_30d"`
+	FetchedAt    int64   `json:"fetched_at"`
 }
 
 func (s *Server) handleSpendKeys(w http.ResponseWriter, r *http.Request) {
-	resp := SpendKeysResponse{}
-	resp.Anthropic = s.loadKeys("anthropic", s.spendAnthropic != nil)
-	resp.OpenAI = ProviderKeys{Configured: false, Keys: []usagestore.KeySpend{}}
+	resp := SpendKeysResponse{
+		Anthropic: s.assembleProvider("anthropic", s.spendAnthropic != nil),
+		OpenAI:    s.assembleProvider("openai", false),
+	}
 	writeJSON(w, resp)
 }
 
-func (s *Server) loadKeys(provider string, configured bool) ProviderKeys {
-	out := ProviderKeys{Configured: configured, Keys: []usagestore.KeySpend{}}
-	rows, err := s.store.LatestKeySpend(provider)
+// assembleProvider builds one ProviderAccount: pulls KeyMeta + per-window
+// spend totals + top-ups and combines them.
+func (s *Server) assembleProvider(provider string, configured bool) ProviderAccount {
+	out := ProviderAccount{
+		Configured:   configured,
+		AdminKeyHint: s.adminHints[provider],
+		Topups:       []usagestore.Topup{},
+		Keys:         []KeyRow{},
+	}
+
+	// Per-window totals: 24h / 7d / 30d. Cutoffs are UTC-day aligned to match
+	// how spend_daily is keyed; "24h" is effectively today + yesterday.
+	now := time.Now().UTC()
+	day1 := now.AddDate(0, 0, -1).Truncate(24 * time.Hour).Unix()
+	day7 := now.AddDate(0, 0, -7).Truncate(24 * time.Hour).Unix()
+	day30 := now.AddDate(0, 0, -30).Truncate(24 * time.Hour).Unix()
+
+	per24, _ := s.store.PerKeyTotals(provider, day1)
+	per7, _ := s.store.PerKeyTotals(provider, day7)
+	per30, _ := s.store.PerKeyTotals(provider, day30)
+
+	metas, err := s.store.ListKeyMeta(provider)
 	if err != nil {
-		log.Printf("[spend] latest %s keys: %v", provider, err)
-		return out
+		log.Printf("[spend] list meta %s: %v", provider, err)
 	}
-	// Drop the raw JSON from list responses — UI fetches it lazily on expand.
-	for i := range rows {
-		rows[i].RawJSON = ""
+	for _, m := range metas {
+		row := KeyRow{
+			APIKeyID:     m.APIKeyID,
+			APIKeyName:   m.APIKeyName,
+			APIKeyHint:   m.APIKeyHint,
+			APIKeyStatus: m.APIKeyStatus,
+			Total24h:     per24[m.APIKeyID],
+			Total7d:      per7[m.APIKeyID],
+			Total30d:     per30[m.APIKeyID],
+			FetchedAt:    m.FetchedAt,
+		}
+		out.Keys = append(out.Keys, row)
+		out.Total24h += row.Total24h
+		out.Total7d += row.Total7d
+		out.Total30d += row.Total30d
 	}
-	if rows == nil {
-		rows = []usagestore.KeySpend{}
+
+	// Top-ups + remaining computation. "Remaining" = sum(top-ups) − spend
+	// since the earliest top-up date. If no top-ups, remaining is nil so the
+	// UI knows to show the "Add credit" empty state instead of $0.
+	topups, err := s.store.ListTopups(provider)
+	if err != nil {
+		log.Printf("[spend] list topups %s: %v", provider, err)
 	}
-	out.Keys = rows
+	if topups != nil {
+		out.Topups = topups
+	}
+	if len(out.Topups) > 0 {
+		var topupsTotal float64
+		for _, t := range out.Topups {
+			topupsTotal += t.AmountUSD
+		}
+		baseline := out.Topups[0].OccurredAt
+		spend, err := s.store.SumSpendSince(provider, "", baseline)
+		if err != nil {
+			log.Printf("[spend] sum since baseline %s: %v", provider, err)
+		}
+		remaining := topupsTotal - spend
+		out.TopupsTotalUSD = topupsTotal
+		out.SpendSinceBaseline = spend
+		out.RemainingUSD = &remaining
+		out.BalanceSince = &baseline
+	}
+
 	return out
 }
 
 func (s *Server) handleSpendKeyRaw(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 	apiKeyID := r.PathValue("api_key_id")
-	raw, err := s.store.LatestKeySpendRaw(provider, apiKeyID)
+	raw, err := s.store.LatestKeyRaw(provider, apiKeyID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -269,7 +365,6 @@ func (s *Server) handleSpendKeyRaw(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(raw))
 }
 
-// handleSpendRefresh forces an immediate fetch for one provider.
 func (s *Server) handleSpendRefresh(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	switch provider {
@@ -278,26 +373,109 @@ func (s *Server) handleSpendRefresh(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"anthropic admin credential not configured"}`, http.StatusNotFound)
 			return
 		}
-		snaps, err := s.spendAnthropic.Fetch()
+		res, err := s.spendAnthropic.Fetch()
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, err)
 			return
 		}
-		for _, snap := range snaps {
-			if err := s.store.SaveKeySpend(snap); err != nil {
-				writeErr(w, http.StatusInternalServerError, err)
-				return
-			}
+		if err := s.persistAnthropic(res); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
 		}
-		// Strip raw JSON from the response — the caller can re-fetch it via /raw.
-		for i := range snaps {
-			snaps[i].RawJSON = ""
-		}
-		writeJSON(w, snaps)
+		s.SaveAdminHint("anthropic", res.AdminKeyHint)
+		writeJSON(w, map[string]interface{}{"keys": len(res.Keys), "daily": len(res.Daily)})
 	default:
 		http.Error(w, `{"error":"unknown provider"}`, http.StatusBadRequest)
 	}
 }
+
+// persistAnthropic writes one Fetch result into the store.
+func (s *Server) persistAnthropic(res *spend.AnthropicResult) error {
+	for _, m := range res.Keys {
+		if err := s.store.SaveKeyMeta(m); err != nil {
+			return fmt.Errorf("save key meta %s: %w", m.APIKeyID, err)
+		}
+	}
+	for _, d := range res.Daily {
+		if err := s.store.SaveDailySpend(d); err != nil {
+			return fmt.Errorf("save daily %s/%s: %w", d.APIKeyID, d.Date, err)
+		}
+	}
+	return nil
+}
+
+// ---- topups ----
+
+func (s *Server) handleListTopups(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	if provider == "" {
+		http.Error(w, `{"error":"provider query param required"}`, http.StatusBadRequest)
+		return
+	}
+	topups, err := s.store.ListTopups(provider)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if topups == nil {
+		topups = []usagestore.Topup{}
+	}
+	writeJSON(w, topups)
+}
+
+type topupRequest struct {
+	Provider   string  `json:"provider"`
+	AmountUSD  float64 `json:"amount_usd"`
+	OccurredAt int64   `json:"occurred_at"` // unix sec, optional → defaults to now
+	OccurredAtStr string `json:"occurred_at_str"` // YYYY-MM-DD, optional → parsed UTC midnight
+	Note       string  `json:"note"`
+}
+
+func (s *Server) handleAddTopup(w http.ResponseWriter, r *http.Request) {
+	var req topupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	occurredAt := req.OccurredAt
+	if occurredAt == 0 && req.OccurredAtStr != "" {
+		t, err := time.Parse("2006-01-02", req.OccurredAtStr)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("occurred_at_str: %w", err))
+			return
+		}
+		occurredAt = t.UTC().Unix()
+	}
+	if occurredAt == 0 {
+		occurredAt = time.Now().Unix()
+	}
+	id, err := s.store.AddTopup(usagestore.Topup{
+		Provider:   req.Provider,
+		AmountUSD:  req.AmountUSD,
+		OccurredAt: occurredAt,
+		Note:       req.Note,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]int64{"id": id})
+}
+
+func (s *Server) handleDeleteTopup(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"bad id"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.store.DeleteTopup(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- misc ----
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})

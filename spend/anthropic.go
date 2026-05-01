@@ -17,14 +17,30 @@ import (
 )
 
 const (
-	anthropicAPIKeysURL  = "https://api.anthropic.com/v1/organizations/api_keys"
-	anthropicUsageURL    = "https://api.anthropic.com/v1/organizations/usage_report/messages"
-	anthropicAPIVersion  = "2023-06-01"
+	anthropicAPIKeysURL = "https://api.anthropic.com/v1/organizations/api_keys"
+	anthropicUsageURL   = "https://api.anthropic.com/v1/organizations/usage_report/messages"
+	anthropicAPIVersion = "2023-06-01"
+
+	// FetchDays is how far back we pull usage_report buckets. Has to cover
+	// the oldest top-up date users care about; 90 days is generous and only
+	// costs one extra page on the Anthropic side.
+	FetchDays = 90
 )
 
+// AnthropicResult is the full output of a single Fetch — metadata for every
+// API key on the org plus daily-bucketed cost rows. Save to the store as:
+//
+//	for each k in Keys:    SaveKeyMeta(k)
+//	for each d in Daily:   SaveDailySpend(d)
+type AnthropicResult struct {
+	AdminKeyHint string
+	Keys         []usagestore.KeyMeta
+	Daily        []usagestore.DailySpend
+}
+
 // AnthropicKeyCollector lists every API key on the org and computes spend
-// per key from usage_report/messages. The admin key is fetched lazily so
-// rotation is picked up without a process restart.
+// per (key, day) from usage_report/messages. The admin key is fetched lazily
+// so rotation is picked up without a process restart.
 type AnthropicKeyCollector struct {
 	APIKeyFn   func() (string, error)
 	HTTPClient *http.Client
@@ -36,7 +52,7 @@ type AnthropicKeyCollector struct {
 func NewAnthropicKey(apiKeyFn func() (string, error)) *AnthropicKeyCollector {
 	return &AnthropicKeyCollector{
 		APIKeyFn:   apiKeyFn,
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		HTTPClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -54,13 +70,10 @@ type rawAPIKeysResponse struct {
 	LastID  string      `json:"last_id"`
 }
 
-// rawUsageBucket matches the documented shape of usage_report/messages with
-// group_by=api_key_id,model. Cache breakdown is in cache_creation; we want
-// both the 5m and 1h buckets so cache-write cost is correct.
 type rawUsageBucket struct {
-	StartingAt string             `json:"starting_at"`
-	EndingAt   string             `json:"ending_at"`
-	Results    []rawUsageResult   `json:"results"`
+	StartingAt string           `json:"starting_at"`
+	EndingAt   string           `json:"ending_at"`
+	Results    []rawUsageResult `json:"results"`
 }
 
 type rawCacheCreation struct {
@@ -69,12 +82,12 @@ type rawCacheCreation struct {
 }
 
 type rawUsageResult struct {
-	UncachedInput       int64            `json:"uncached_input_tokens"`
-	CacheRead           int64            `json:"cache_read_input_tokens"`
-	CacheCreation       rawCacheCreation `json:"cache_creation"`
-	OutputTokens        int64            `json:"output_tokens"`
-	APIKeyID            string           `json:"api_key_id"`
-	Model               string           `json:"model"`
+	UncachedInput int64            `json:"uncached_input_tokens"`
+	CacheRead     int64            `json:"cache_read_input_tokens"`
+	CacheCreation rawCacheCreation `json:"cache_creation"`
+	OutputTokens  int64            `json:"output_tokens"`
+	APIKeyID      string           `json:"api_key_id"`
+	Model         string           `json:"model"`
 }
 
 type rawUsageResponse struct {
@@ -83,64 +96,78 @@ type rawUsageResponse struct {
 	NextPage string           `json:"next_page"`
 }
 
-// Fetch returns one KeySpend per active+archived API key on the org. Rather
-// than make N requests (one per key), we make one big usage_report request
-// for the full 30-day window grouped by (api_key_id, model) and partition
-// the results locally. That keeps us inside Anthropic's tight admin-API
-// rate limits while still letting us compute every window.
-func (c *AnthropicKeyCollector) Fetch() ([]usagestore.KeySpend, error) {
+// Fetch returns metadata for every key + one daily-cost row per (key, day).
+// One usage_report request covers the full FetchDays window; we partition
+// per-key locally to stay inside Anthropic's tight admin-API rate limits.
+func (c *AnthropicKeyCollector) Fetch() (*AnthropicResult, error) {
+	adminHint, err := c.adminKeyHint()
+	if err != nil {
+		return nil, fmt.Errorf("admin key: %w", err)
+	}
+
 	keys, err := c.listKeys()
 	if err != nil {
 		return nil, fmt.Errorf("list api keys: %w", err)
 	}
-	if len(keys) == 0 {
-		return nil, nil
-	}
 
 	end := time.Now().UTC().Truncate(24 * time.Hour) // today 00:00 UTC
-	start := end.AddDate(0, 0, -30)
+	start := end.AddDate(0, 0, -FetchDays)
 
 	usage, rawByKey, err := c.fetchUsage(start, end)
 	if err != nil {
 		return nil, fmt.Errorf("usage_report: %w", err)
 	}
 
-	day7Cutoff := end.AddDate(0, 0, -7).Format(time.RFC3339)
-	day1Cutoff := end.AddDate(0, 0, -1).Format(time.RFC3339)
-
-	out := make([]usagestore.KeySpend, 0, len(keys))
+	now := time.Now().Unix()
+	res := &AnthropicResult{
+		AdminKeyHint: adminHint,
+		Keys:         make([]usagestore.KeyMeta, 0, len(keys)),
+		Daily:        make([]usagestore.DailySpend, 0, len(keys)*FetchDays),
+	}
 	for _, k := range keys {
-		var c30, c7, c1 float64
-		for _, b := range usage {
-			for _, r := range b.Results {
-				if r.APIKeyID != k.ID {
-					continue
-				}
-				cost := costFromTokens(r, c.OnUnknownModel)
-				c30 += cost
-				if b.StartingAt >= day7Cutoff {
-					c7 += cost
-				}
-				if b.StartingAt >= day1Cutoff {
-					c1 += cost
-				}
-			}
-		}
-		raw := rawByKey[k.ID]
-		out = append(out, usagestore.KeySpend{
+		res.Keys = append(res.Keys, usagestore.KeyMeta{
 			Provider:     "anthropic",
 			APIKeyID:     k.ID,
 			APIKeyName:   k.Name,
 			APIKeyHint:   k.PartialKeyHint,
 			APIKeyStatus: k.Status,
-			TotalUSD24h:  c1,
-			TotalUSD7d:   c7,
-			TotalUSD30d:  c30,
-			RawJSON:      raw,
-			FetchedAt:    time.Now().Unix(),
+			RawJSON:      rawByKey[k.ID],
+			FetchedAt:    now,
 		})
 	}
-	return out, nil
+
+	// One daily row per (key, day) — buckets where the key had any token activity.
+	for _, b := range usage {
+		date := b.StartingAt[:10] // YYYY-MM-DD
+		perKey := map[string]float64{}
+		for _, r := range b.Results {
+			perKey[r.APIKeyID] += costFromTokens(r, c.OnUnknownModel)
+		}
+		for apiKeyID, cost := range perKey {
+			res.Daily = append(res.Daily, usagestore.DailySpend{
+				Provider:  "anthropic",
+				APIKeyID:  apiKeyID,
+				Date:      date,
+				TotalUSD:  cost,
+				FetchedAt: now,
+			})
+		}
+	}
+	return res, nil
+}
+
+// adminKeyHint returns "sk-ant-admin01-…" style fingerprint for display.
+// 14 chars + ellipsis + last 4 keeps it identifiable without logging the
+// secret.
+func (c *AnthropicKeyCollector) adminKeyHint() (string, error) {
+	k, err := c.APIKeyFn()
+	if err != nil {
+		return "", err
+	}
+	if len(k) < 24 {
+		return k, nil
+	}
+	return k[:14] + "..." + k[len(k)-4:], nil
 }
 
 func (c *AnthropicKeyCollector) listKeys() ([]rawAPIKey, error) {
@@ -230,13 +257,11 @@ func (c *AnthropicKeyCollector) fetchUsage(start, end time.Time) ([]rawUsageBuck
 		page = raw.NextPage
 	}
 
-	// Build a per-key raw JSON snapshot so the UI can show "Show raw response"
-	// without us having to redo the API call. Filtering on the merged list is
-	// cheap and gives consistent debug data even after pagination.
+	// Build a per-key raw JSON snapshot so the UI can show "raw" without a
+	// second API call.
 	rawByKey := map[string]string{}
 	byKey := map[string][]rawUsageBucket{}
 	for _, b := range all {
-		// Group results in this bucket per key.
 		perKey := map[string][]rawUsageResult{}
 		for _, r := range b.Results {
 			perKey[r.APIKeyID] = append(perKey[r.APIKeyID], r)
@@ -260,9 +285,8 @@ func (c *AnthropicKeyCollector) fetchUsage(start, end time.Time) ([]rawUsageBuck
 	return all, rawByKey, nil
 }
 
-// costFromTokens applies pricing × per-model multipliers. Calls onUnknown for
-// every model we don't have a price for (with the dollar figure tallied as 0
-// — visible gap rather than a silent under-report).
+// costFromTokens applies pricing × per-model multipliers. Unknown models tally
+// $0 and trigger onUnknown so the gap is visible.
 func costFromTokens(r rawUsageResult, onUnknown func(string)) float64 {
 	p, ok := LookupAnthropic(r.Model)
 	if !ok {
@@ -282,7 +306,7 @@ func costFromTokens(r rawUsageResult, onUnknown func(string)) float64 {
 }
 
 // parseAmountString is kept exported in case raw amounts ever come back as
-// numeric strings on a future field. Currently unused — we compute locally.
+// numeric strings on a future field. Currently unused.
 func parseAmountString(s string) (float64, error) {
 	return strconv.ParseFloat(s, 64)
 }
