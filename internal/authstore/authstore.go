@@ -43,6 +43,49 @@ type Resolved struct {
 	APIKey   string `json:"api_key"`
 }
 
+// CredentialSummary is the subset of /api/credentials we care about. The list
+// endpoint redacts secrets — to read api_key, you have to call ResolveByID.
+type CredentialSummary struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Label    string `json:"label"`
+	AuthType string `json:"auth_type"`
+}
+
+// ListCredentials returns every credential auth-store knows about (no
+// secrets). Used for admin-key discovery: scan provider=foo + auth_type=api_key
+// and resolve each to find ones whose api_key looks like an admin key.
+func (c *Client) ListCredentials() ([]CredentialSummary, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+"/api/credentials", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("auth-store: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("auth-store list returned %d: %s", resp.StatusCode, string(body))
+	}
+	var arr []CredentialSummary
+	if err := json.Unmarshal(body, &arr); err == nil {
+		return arr, nil
+	}
+	// Tolerate the {credentials: [...]} variant.
+	var wrap struct {
+		Credentials []CredentialSummary `json:"credentials"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, fmt.Errorf("parse list: %w", err)
+	}
+	return wrap.Credentials, nil
+}
+
 // ResolveByID fetches a credential and returns its API key. Reason is logged
 // in auth-store's audit trail.
 func (c *Client) ResolveByID(id, reason string) (*Resolved, error) {

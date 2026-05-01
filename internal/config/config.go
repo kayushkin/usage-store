@@ -14,13 +14,13 @@ type Config struct {
 	RefreshInterval time.Duration // background refresh cadence (limits)
 	CodexMaxAge     time.Duration // when a codex rollout snapshot becomes stale
 
-	// Spend (admin-API cost reporting). Empty cred IDs disable that provider's
-	// spend collector — the rest of the service still runs.
-	AuthStoreURL          string
-	AuthStoreToken        string
-	AnthropicAdminCredID  string
-	OpenAIAdminCredID     string
-	SpendRefreshInterval  time.Duration
+	// Spend (per-API-key cost via admin endpoints). Admin keys are
+	// auto-discovered in auth-store by api_key prefix — no per-provider env
+	// var to set. AUTH_STORE_TOKEN is the only thing needed; without it,
+	// spend collection stays off and the rest of the service still runs.
+	AuthStoreURL         string
+	AuthStoreToken       string
+	SpendRefreshInterval time.Duration
 }
 
 func Load() Config {
@@ -32,8 +32,6 @@ func Load() Config {
 		CodexMaxAge:          envDur("USAGE_STORE_CODEX_MAX_AGE", 2*time.Hour),
 		AuthStoreURL:         envOr("AUTH_STORE_URL", "http://127.0.0.1:8303"),
 		AuthStoreToken:       os.Getenv("AUTH_STORE_TOKEN"),
-		AnthropicAdminCredID: os.Getenv("USAGE_STORE_ANTHROPIC_ADMIN_CRED_ID"),
-		OpenAIAdminCredID:    os.Getenv("USAGE_STORE_OPENAI_ADMIN_CRED_ID"),
 		SpendRefreshInterval: envDur("USAGE_STORE_SPEND_REFRESH_INTERVAL", time.Hour),
 	}
 }

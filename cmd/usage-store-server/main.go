@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,7 +43,6 @@ func main() {
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
 
-	// Graceful shutdown on SIGINT / SIGTERM.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -55,46 +54,69 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("[usage-store] listening on %s (limits db: %s, tokens db: %s, refresh: %s, spend refresh: %s, anthropic-admin: %s, openai-admin: %s)",
+	log.Printf("[usage-store] listening on %s (limits db: %s, tokens db: %s, refresh: %s, spend refresh: %s, anthropic-admin: %s)",
 		cfg.ListenAddr, cfg.LimitsDBPath, cfg.TokensDBPath, cfg.RefreshInterval, cfg.SpendRefreshInterval,
-		boolStr(sc.Anthropic != nil), boolStr(sc.OpenAI != nil))
+		boolStr(sc.Anthropic != nil))
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[usage-store] server error: %v", err)
 	}
 }
 
-// buildSpendCollectors wires each spend collector to a lazy auth-store lookup
-// against the configured credential ID. A missing credential ID disables that
-// provider's spend collector — the rest of usage-store still runs.
+// buildSpendCollectors discovers admin credentials in auth-store rather than
+// taking explicit credential IDs. It scans every credential, resolves the
+// api_key, and matches by prefix (sk-ant-admin- for Anthropic, sk-admin- for
+// OpenAI). The first match wins. Future rotations are picked up because the
+// resolve happens lazily on every Fetch.
 func buildSpendCollectors(cfg config.Config) server.SpendCollectors {
 	out := server.SpendCollectors{}
-	if cfg.AnthropicAdminCredID == "" && cfg.OpenAIAdminCredID == "" {
+
+	if cfg.AuthStoreToken == "" {
+		log.Printf("[spend] AUTH_STORE_TOKEN not set; spend collection disabled")
+		return out
+	}
+	asClient := authstore.New(cfg.AuthStoreURL, cfg.AuthStoreToken, "usage-store")
+
+	creds, err := asClient.ListCredentials()
+	if err != nil {
+		log.Printf("[spend] auth-store list failed: %v", err)
 		return out
 	}
 
-	asClient := authstore.New(cfg.AuthStoreURL, cfg.AuthStoreToken, "usage-store")
-
-	if cfg.AnthropicAdminCredID != "" {
-		credID := cfg.AnthropicAdminCredID
-		out.Anthropic = spend.NewAnthropic(func() (string, error) {
-			r, err := asClient.ResolveByID(credID, "fetch:anthropic-cost-report")
+	anthropicAdminID := findAdminCredID(asClient, creds, "anthropic", "sk-ant-admin-")
+	if anthropicAdminID != "" {
+		log.Printf("[spend] anthropic admin credential discovered: %s", anthropicAdminID)
+		out.Anthropic = spend.NewAnthropicKey(func() (string, error) {
+			r, err := asClient.ResolveByID(anthropicAdminID, "fetch:anthropic-spend-per-key")
 			if err != nil {
 				return "", err
 			}
 			return r.APIKey, nil
 		})
-	}
-	if cfg.OpenAIAdminCredID != "" {
-		credID := cfg.OpenAIAdminCredID
-		out.OpenAI = spend.NewOpenAI(func() (string, error) {
-			r, err := asClient.ResolveByID(credID, "fetch:openai-costs")
-			if err != nil {
-				return "", err
-			}
-			return r.APIKey, nil
-		})
+		out.Anthropic.OnUnknownModel = func(model string) {
+			log.Printf("[spend] unknown anthropic model %q (priced as $0; add to spend/pricing.go)", model)
+		}
 	}
 	return out
+}
+
+// findAdminCredID resolves each credential of the given provider until one
+// returns an api_key with the expected admin prefix. Auditing every resolve
+// is intentional — auth-store's audit trail will show this discovery sweep.
+func findAdminCredID(c *authstore.Client, creds []authstore.CredentialSummary, provider, prefix string) string {
+	for _, cred := range creds {
+		if cred.Provider != provider || cred.AuthType != "api_key" {
+			continue
+		}
+		r, err := c.ResolveByID(cred.ID, "discover:admin-key")
+		if err != nil {
+			log.Printf("[spend] resolve %s for discovery failed: %v", cred.ID, err)
+			continue
+		}
+		if strings.HasPrefix(r.APIKey, prefix) {
+			return cred.ID
+		}
+	}
+	return ""
 }
 
 func boolStr(b bool) string {
@@ -105,13 +127,6 @@ func boolStr(b bool) string {
 }
 
 // runRefresher polls each provider on the configured interval and persists snapshots.
-//
-// Anthropic: hits the OAuth usage API (cheap; no quota cost). Logs but doesn't
-// crash on failure — we want the service to stay up if creds expire.
-//
-// Codex: rescans local rollout JSONLs. We never probe (stale-skip per design).
-// If the latest rollout is older than CodexMaxAge the snapshot is still saved
-// but the IsStale flag will be true on read, so consumers can decide what to do.
 func runRefresher(ctx context.Context, s *usagestore.Store, ant *anthropic.Collector, cx *codex.Reader, interval time.Duration) {
 	tick := func() {
 		if snap, raw, err := ant.Fetch(); err != nil {
@@ -124,41 +139,6 @@ func runRefresher(ctx context.Context, s *usagestore.Store, ant *anthropic.Colle
 		} else if snap != nil {
 			if err := s.SaveLimits(*snap, raw); err != nil {
 				log.Printf("[refresh] codex save: %v", err)
-			}
-		}
-	}
-
-	tick() // fire immediately on start
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			tick()
-		}
-	}
-}
-
-// runSpendRefresher polls each configured provider's admin cost API on a
-// longer cadence (default 1h). Spend rollups don't change minute-to-minute and
-// the admin endpoints are rate-limited per docs. Failures are logged but do
-// not stop the loop — credential rotation or transient 5xx shouldn't take the
-// service down.
-func runSpendRefresher(ctx context.Context, s *usagestore.Store, sc server.SpendCollectors, interval time.Duration) {
-	if sc.Anthropic == nil && sc.OpenAI == nil {
-		return
-	}
-	tick := func() {
-		if sc.Anthropic != nil {
-			if err := saveSpend(s, "anthropic", sc.Anthropic.Fetch); err != nil {
-				log.Printf("[spend-refresh] anthropic: %v", err)
-			}
-		}
-		if sc.OpenAI != nil {
-			if err := saveSpend(s, "openai", sc.OpenAI.Fetch); err != nil {
-				log.Printf("[spend-refresh] openai: %v", err)
 			}
 		}
 	}
@@ -176,15 +156,34 @@ func runSpendRefresher(ctx context.Context, s *usagestore.Store, sc server.Spend
 	}
 }
 
-func saveSpend(s *usagestore.Store, provider string, fetch func() ([]usagestore.SpendSnapshot, [][]byte, error)) error {
-	snaps, raws, err := fetch()
-	if err != nil {
-		return err
+// runSpendRefresher polls each configured provider's per-key spend on a
+// longer cadence (default 1h). Failures are logged but never stop the loop.
+func runSpendRefresher(ctx context.Context, s *usagestore.Store, sc server.SpendCollectors, interval time.Duration) {
+	if sc.Anthropic == nil {
+		return
 	}
-	for i, snap := range snaps {
-		if err := s.SaveSpend(snap, raws[i]); err != nil {
-			return fmt.Errorf("save %s/%s: %w", provider, snap.Window, err)
+	tick := func() {
+		snaps, err := sc.Anthropic.Fetch()
+		if err != nil {
+			log.Printf("[spend-refresh] anthropic: %v", err)
+			return
+		}
+		for _, snap := range snaps {
+			if err := s.SaveKeySpend(snap); err != nil {
+				log.Printf("[spend-refresh] save %s: %v", snap.APIKeyID, err)
+			}
 		}
 	}
-	return nil
+
+	tick()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tick()
+		}
+	}
 }
