@@ -59,23 +59,29 @@ type rawAnthropicCostEntry struct {
 }
 
 // Fetch returns one snapshot per (day, week, month) window.
+//
+// Note on time alignment: cost_report with bucket_width=1d rejects ranges that
+// aren't UTC-midnight-aligned ("ending date must be after starting date" when
+// the bucket math doesn't line up). So each window is "the last N completed
+// UTC days", ending at today's UTC 00:00. The current UTC day is excluded —
+// that's how the report's data is published anyway.
 func (c *AnthropicCollector) Fetch() ([]usagestore.SpendSnapshot, [][]byte, error) {
-	now := time.Now().UTC()
+	end := time.Now().UTC().Truncate(24 * time.Hour) // today 00:00 UTC
 	out := make([]usagestore.SpendSnapshot, 0, 3)
 	raws := make([][]byte, 0, 3)
 
 	windows := []struct {
 		name string
-		dur  time.Duration
+		days int
 	}{
-		{usagestore.SpendWindowDay, 24 * time.Hour},
-		{usagestore.SpendWindowWeek, 7 * 24 * time.Hour},
-		{usagestore.SpendWindowMonth, 30 * 24 * time.Hour},
+		{usagestore.SpendWindowDay, 1},
+		{usagestore.SpendWindowWeek, 7},
+		{usagestore.SpendWindowMonth, 30},
 	}
 
 	for _, w := range windows {
-		start := now.Add(-w.dur)
-		snap, raw, err := c.fetchOne(w.name, start, now)
+		start := end.AddDate(0, 0, -w.days)
+		snap, raw, err := c.fetchOne(w.name, start, end)
 		if err != nil {
 			return nil, nil, fmt.Errorf("anthropic spend %s: %w", w.name, err)
 		}

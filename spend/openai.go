@@ -47,23 +47,26 @@ type rawOpenAIResponse struct {
 }
 
 // Fetch returns one snapshot per (day, week, month) window.
+//
+// OpenAI's costs endpoint expects bucket-aligned ranges; we follow the same
+// UTC-day-aligned convention as the Anthropic collector for consistency.
 func (c *OpenAICollector) Fetch() ([]usagestore.SpendSnapshot, [][]byte, error) {
-	now := time.Now().UTC()
+	end := time.Now().UTC().Truncate(24 * time.Hour)
 	out := make([]usagestore.SpendSnapshot, 0, 3)
 	raws := make([][]byte, 0, 3)
 
 	windows := []struct {
 		name string
-		dur  time.Duration
+		days int
 	}{
-		{usagestore.SpendWindowDay, 24 * time.Hour},
-		{usagestore.SpendWindowWeek, 7 * 24 * time.Hour},
-		{usagestore.SpendWindowMonth, 30 * 24 * time.Hour},
+		{usagestore.SpendWindowDay, 1},
+		{usagestore.SpendWindowWeek, 7},
+		{usagestore.SpendWindowMonth, 30},
 	}
 
 	for _, w := range windows {
-		start := now.Add(-w.dur)
-		snap, raw, err := c.fetchOne(w.name, start, now)
+		start := end.AddDate(0, 0, -w.days)
+		snap, raw, err := c.fetchOne(w.name, start, end)
 		if err != nil {
 			return nil, nil, fmt.Errorf("openai spend %s: %w", w.name, err)
 		}
