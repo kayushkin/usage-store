@@ -11,26 +11,36 @@ import (
 	usagestore "github.com/kayushkin/usage-store"
 	"github.com/kayushkin/usage-store/anthropic"
 	"github.com/kayushkin/usage-store/codex"
+	"github.com/kayushkin/usage-store/spend"
 
 	_ "modernc.org/sqlite"
 )
 
 // Server exposes usage-store data over HTTP. All routes live under /api/usage.
 type Server struct {
-	store        *usagestore.Store
-	tokensDBPath string
-	anthropic    *anthropic.Collector
-	codex        *codex.Reader
-	mux          *http.ServeMux
+	store           *usagestore.Store
+	tokensDBPath    string
+	anthropic       *anthropic.Collector
+	codex           *codex.Reader
+	spendAnthropic  *spend.AnthropicCollector // nil when no admin cred configured
+	spendOpenAI     *spend.OpenAICollector    // nil when no admin cred configured
+	mux             *http.ServeMux
 }
 
-func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx *codex.Reader) *Server {
+type SpendCollectors struct {
+	Anthropic *spend.AnthropicCollector
+	OpenAI    *spend.OpenAICollector
+}
+
+func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx *codex.Reader, sc SpendCollectors) *Server {
 	srv := &Server{
-		store:        s,
-		tokensDBPath: tokensDBPath,
-		anthropic:    ant,
-		codex:        cx,
-		mux:          http.NewServeMux(),
+		store:          s,
+		tokensDBPath:   tokensDBPath,
+		anthropic:      ant,
+		codex:          cx,
+		spendAnthropic: sc.Anthropic,
+		spendOpenAI:    sc.OpenAI,
+		mux:            http.NewServeMux(),
 	}
 	srv.routes()
 	return srv
@@ -42,6 +52,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/usage/limits/{provider}", s.handleProviderLimits)
 	s.mux.HandleFunc("GET /api/usage/limits/{provider}/history", s.handleHistory)
 	s.mux.HandleFunc("POST /api/usage/limits/refresh", s.handleRefresh)
+	s.mux.HandleFunc("GET /api/usage/spend", s.handleSpend)
+	s.mux.HandleFunc("POST /api/usage/spend/refresh", s.handleSpendRefresh)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 }
 
@@ -201,6 +213,89 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, snap)
+	default:
+		http.Error(w, `{"error":"unknown provider"}`, http.StatusBadRequest)
+	}
+}
+
+// SpendResponse is the shape returned by /api/usage/spend. Each provider has
+// at most one snapshot per (day, week, month) window. Unconfigured providers
+// are returned with configured=false so the UI can render an actionable hint
+// rather than a silent gap.
+type SpendResponse struct {
+	Anthropic SpendProvider `json:"anthropic"`
+	OpenAI    SpendProvider `json:"openai"`
+}
+
+type SpendProvider struct {
+	Configured bool                                 `json:"configured"`
+	Windows    map[string]*usagestore.SpendSnapshot `json:"windows"`
+}
+
+func (s *Server) handleSpend(w http.ResponseWriter, r *http.Request) {
+	resp := SpendResponse{
+		Anthropic: s.loadSpend("anthropic", s.spendAnthropic != nil),
+		OpenAI:    s.loadSpend("openai", s.spendOpenAI != nil),
+	}
+	writeJSON(w, resp)
+}
+
+func (s *Server) loadSpend(provider string, configured bool) SpendProvider {
+	out := SpendProvider{
+		Configured: configured,
+		Windows:    map[string]*usagestore.SpendSnapshot{},
+	}
+	for _, w := range []string{usagestore.SpendWindowDay, usagestore.SpendWindowWeek, usagestore.SpendWindowMonth} {
+		snap, err := s.store.LatestSpend(provider, w)
+		if err != nil {
+			log.Printf("[spend] latest %s/%s: %v", provider, w, err)
+			continue
+		}
+		out.Windows[w] = snap
+	}
+	return out
+}
+
+// handleSpendRefresh forces an immediate fetch for one provider. Returns 404
+// when that provider has no admin credential configured, so the caller knows
+// to set USAGE_STORE_*_ADMIN_CRED_ID rather than retrying.
+func (s *Server) handleSpendRefresh(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	switch provider {
+	case "anthropic":
+		if s.spendAnthropic == nil {
+			http.Error(w, `{"error":"anthropic admin credential not configured"}`, http.StatusNotFound)
+			return
+		}
+		snaps, raws, err := s.spendAnthropic.Fetch()
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		for i, snap := range snaps {
+			if err := s.store.SaveSpend(snap, raws[i]); err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+		writeJSON(w, snaps)
+	case "openai":
+		if s.spendOpenAI == nil {
+			http.Error(w, `{"error":"openai admin credential not configured"}`, http.StatusNotFound)
+			return
+		}
+		snaps, raws, err := s.spendOpenAI.Fetch()
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		for i, snap := range snaps {
+			if err := s.store.SaveSpend(snap, raws[i]); err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+		writeJSON(w, snaps)
 	default:
 		http.Error(w, `{"error":"unknown provider"}`, http.StatusBadRequest)
 	}

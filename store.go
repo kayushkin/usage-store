@@ -81,6 +81,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate limits: %w", err)
 	}
+	if err := s.migrateSpend(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate spend: %w", err)
+	}
 
 	return s, nil
 }

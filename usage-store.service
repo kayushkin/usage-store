@@ -1,5 +1,5 @@
 [Unit]
-Description=usage-store — token + subscription-limit aggregator
+Description=usage-store — token + subscription-limit + spend aggregator
 After=network.target
 
 [Service]
@@ -7,6 +7,14 @@ ExecStart=/home/kayushkincom/bin/usage-store-server
 Restart=on-failure
 RestartSec=3
 Environment=USAGE_STORE_LISTEN_ADDR=:8185
+# Spend collectors are off until both AUTH_STORE_TOKEN and the per-provider
+# admin credential IDs are set. A host-local drop-in at
+# ~/.config/systemd/user/usage-store.service.d/spend.conf is the right place
+# to fill these in — keep secrets out of the repo unit file.
+# Environment=AUTH_STORE_URL=http://127.0.0.1:8303
+# Environment=AUTH_STORE_TOKEN=
+# Environment=USAGE_STORE_ANTHROPIC_ADMIN_CRED_ID=
+# Environment=USAGE_STORE_OPENAI_ADMIN_CRED_ID=
 
 [Install]
 WantedBy=default.target

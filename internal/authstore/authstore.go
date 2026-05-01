@@ -1,0 +1,79 @@
+// Package authstore is a minimal client for resolving credentials from
+// auth-store (the canonical credential vault on :8303). usage-store needs to
+// pull admin API keys to call provider cost endpoints — this is the smallest
+// surface that lets it do that without dragging in the full auth-store SDK.
+package authstore
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+// Client resolves credentials by ID. All calls require BearerToken plus the
+// X-Auth-App / X-Auth-Reason audit headers — auth-store rejects key-touching
+// routes without them.
+type Client struct {
+	BaseURL     string
+	BearerToken string
+	App         string // identifies the caller in auth-store's audit log
+	HTTPClient  *http.Client
+}
+
+// New returns a client with sane defaults. App should be the name of the
+// service making the call ("usage-store").
+func New(baseURL, token, app string) *Client {
+	return &Client{
+		BaseURL:     baseURL,
+		BearerToken: token,
+		App:         app,
+		HTTPClient:  &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// Resolved is the subset of auth-store's resolvedView we care about. We only
+// need the API key and label (for logging).
+type Resolved struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Label    string `json:"label"`
+	AuthType string `json:"auth_type"`
+	APIKey   string `json:"api_key"`
+}
+
+// ResolveByID fetches a credential and returns its API key. Reason is logged
+// in auth-store's audit trail.
+func (c *Client) ResolveByID(id, reason string) (*Resolved, error) {
+	url := fmt.Sprintf("%s/api/credentials/%s/resolve", c.BaseURL, id)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	}
+	req.Header.Set("X-Auth-App", c.App)
+	req.Header.Set("X-Auth-Reason", reason)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("auth-store: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("auth-store returned %d resolving %s: %s", resp.StatusCode, id, string(body))
+	}
+
+	var out Resolved
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse auth-store response: %w", err)
+	}
+	if out.APIKey == "" {
+		return nil, fmt.Errorf("credential %s has no api_key (auth_type=%s)", id, out.AuthType)
+	}
+	return &out, nil
+}
