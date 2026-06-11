@@ -94,9 +94,12 @@ func (s *Store) Query(f QueryFilter) ([]UsageRecord, error) {
 	for rows.Next() {
 		var r UsageRecord
 		if err := rows.Scan(&r.Date, &r.Agent, &r.Orchestrator, &r.Model, &r.Provider, &r.Session, &r.Harness, &r.InputTokens, &r.OutputTokens, &r.Requests, &r.CostUSD); err != nil {
-			continue
+			return nil, err
 		}
 		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return records, nil
 }
@@ -113,11 +116,19 @@ func (s *Store) Stats(f QueryFilter) (*Stats, error) {
 		return nil, err
 	}
 
-	// Distinct models
-	st.Models, _ = s.distinctCol("model", where, args)
-	st.Agents, _ = s.distinctCol("agent", where, args)
-	st.Harnesses, _ = s.distinctCol("harness", where, args)
-	st.Sessions, _ = s.distinctCol("session", where, args)
+	// Distinct values
+	if st.Models, err = s.distinctCol("model", where, args); err != nil {
+		return nil, err
+	}
+	if st.Agents, err = s.distinctCol("agent", where, args); err != nil {
+		return nil, err
+	}
+	if st.Harnesses, err = s.distinctCol("harness", where, args); err != nil {
+		return nil, err
+	}
+	if st.Sessions, err = s.distinctCol("session", where, args); err != nil {
+		return nil, err
+	}
 
 	return &st, nil
 }
@@ -159,9 +170,12 @@ func (s *Store) Summary(from, to string) ([]UsageRecord, error) {
 	for rows.Next() {
 		var r UsageRecord
 		if err := rows.Scan(&r.Date, &r.Agent, &r.Model, &r.Provider, &r.Session, &r.Harness, &r.InputTokens, &r.OutputTokens, &r.Requests, &r.CostUSD); err != nil {
-			continue
+			return nil, err
 		}
 		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return records, nil
 }
