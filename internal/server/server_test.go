@@ -152,6 +152,39 @@ func TestUsageStatsReportsAllThreePeriods(t *testing.T) {
 	}
 }
 
+// A row that cannot be scanned must not be dropped from the totals — that is the
+// `continue` commit 6382825 removed elsewhere, and it under-reports spend silently.
+//
+// The induced failure is a NULL in a column scanned into a string, i.e. exactly the
+// schema mismatch that commit names. Note it cannot be induced through the numeric
+// columns: they are read through SUM(), and SQLite coerces a non-numeric value to 0
+// rather than failing, so a corrupt integer column under-reports with no error at
+// all — a separate hole this endpoint cannot currently see.
+func TestUsageStatsFailsLoudlyOnAnUnscannableRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE usage (
+		date TEXT NOT NULL, agent TEXT, orchestrator TEXT, model TEXT NOT NULL,
+		input_tokens INTEGER, output_tokens INTEGER, requests INTEGER, cost_usd REAL)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO usage VALUES (date('now'), NULL, 'inber', 'sonnet', 1, 1, 1, 0.1)`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	db.Close()
+
+	srv := &Server{tokensDBPath: path}
+	rec := httptest.NewRecorder()
+	srv.handleUsage(rec, httptest.NewRequest(http.MethodGet, "/api/usage", nil))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("unscannable row reported as %d %s; want an error rather than a silently smaller total",
+			rec.Code, rec.Body.String())
+	}
+}
+
 // A broken tokens DB must not read as "no usage this month". Silent emptiness on a
 // spend surface is indistinguishable from a quiet week.
 func TestUsageStatsFailsLoudlyOnAnUnreadableTable(t *testing.T) {
