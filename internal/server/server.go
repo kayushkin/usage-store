@@ -103,40 +103,48 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		CostUSD      float64 `json:"cost_usd"`
 	}
 
-	queryPeriod := func(days int) []stats {
+	// The projection and the grouping must apply the same COALESCE. Grouping on the
+	// raw column while projecting the substitute splits `orchestrator IS NULL` rows
+	// and literal 'inber' rows into two groups that both render as "inber", so one
+	// agent/orchestrator/model appears twice with its totals divided between them.
+	queryPeriod := func(days int) ([]stats, error) {
 		query := `SELECT agent, COALESCE(orchestrator, 'inber'), model,
 			SUM(input_tokens), SUM(output_tokens), SUM(requests), COALESCE(SUM(cost_usd), 0)
 			FROM usage WHERE date >= date('now', ?)
-			GROUP BY agent, orchestrator, model
+			GROUP BY agent, COALESCE(orchestrator, 'inber'), model
 			ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC`
 		rows, err := db.Query(query, fmt.Sprintf("-%d days", days))
 		if err != nil {
-			log.Printf("[usage] period query: %v", err)
-			return []stats{}
+			return nil, fmt.Errorf("period query (%d days): %w", days, err)
 		}
 		defer rows.Close()
 
-		var out []stats
+		out := []stats{}
 		for rows.Next() {
 			var u stats
 			if err := rows.Scan(&u.Agent, &u.Orchestrator, &u.Model,
 				&u.InputTokens, &u.OutputTokens, &u.Messages, &u.CostUSD); err != nil {
-				continue
+				return nil, fmt.Errorf("scan usage row (%d days): %w", days, err)
 			}
 			u.TotalTokens = u.InputTokens + u.OutputTokens
 			out = append(out, u)
 		}
-		if out == nil {
-			out = []stats{}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate usage rows (%d days): %w", days, err)
 		}
-		return out
+		return out, nil
 	}
 
-	writeJSON(w, map[string]interface{}{
-		"day":   queryPeriod(1),
-		"week":  queryPeriod(7),
-		"month": queryPeriod(30),
-	})
+	periods := map[string]interface{}{}
+	for name, days := range map[string]int{"day": 1, "week": 7, "month": 30} {
+		rows, err := queryPeriod(days)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		periods[name] = rows
+	}
+	writeJSON(w, periods)
 }
 
 // ---- subscription limits (legacy) ----

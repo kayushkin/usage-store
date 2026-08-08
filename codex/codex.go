@@ -26,9 +26,18 @@ import (
 //
 // Codex names them generically as primary/secondary; we map by window_minutes:
 // 300 → five_hour, 10080 → weekly. Anything else falls through with its raw key.
+//
+// A window that omits window_minutes keys on its position instead. window_minutes
+// is optional on the wire, and position is the only distinguishing fact left when
+// it is absent — so it is a real key, not a placeholder. Keying both such windows
+// on one shared literal would let the second silently overwrite the first, and
+// Windows is consumed programmatically (the autoworker gates a dispatch on
+// Windows["weekly"]), not rendered as a display bucket.
 const (
-	WindowFiveHour = "five_hour"
-	WindowWeekly   = "weekly"
+	WindowFiveHour  = "five_hour"
+	WindowWeekly    = "weekly"
+	WindowPrimary   = "primary"
+	WindowSecondary = "secondary"
 )
 
 // rateLimitWindow matches the wire format inside rollout JSONL.
@@ -102,7 +111,13 @@ func (r *Reader) Latest() (*usagestore.ProviderLimits, []byte, error) {
 		if snap == nil {
 			continue
 		}
-		out := normalise(snap, ts)
+		// A contradictory snapshot is not an unreadable file: the rollout parsed
+		// fine and the provider stated two windows we cannot tell apart. Surface it
+		// rather than moving on to an older file and reporting stale limits as fresh.
+		out, err := normalise(snap, ts)
+		if err != nil {
+			return nil, nil, err
+		}
 		if r.MaxAge > 0 {
 			staleAt := ts.Add(r.MaxAge).Unix()
 			out.StaleAfter = &staleAt
@@ -233,7 +248,11 @@ func scanRollout(path string) (*rateLimits, []byte, time.Time, error) {
 }
 
 // normalise maps Codex's primary/secondary windows onto stable keys.
-func normalise(snap *rateLimits, snapAt time.Time) *usagestore.ProviderLimits {
+//
+// It fails rather than let one window overwrite another: two windows sharing a key
+// means the snapshot is self-contradictory, and silently keeping the last one would
+// report one limit where the provider stated two.
+func normalise(snap *rateLimits, snapAt time.Time) (*usagestore.ProviderLimits, error) {
 	out := &usagestore.ProviderLimits{
 		Provider:   "codex",
 		SnapshotAt: snapAt.Unix(),
@@ -243,25 +262,37 @@ func normalise(snap *rateLimits, snapAt time.Time) *usagestore.ProviderLimits {
 	if snap.PlanType != nil {
 		out.PlanType = *snap.PlanType
 	}
-	addWindow := func(w *rateLimitWindow) {
+	addWindow := func(w *rateLimitWindow, position string) error {
 		if w == nil {
-			return
+			return nil
 		}
-		key := keyForWindow(w.WindowMinutes)
+		key := keyForWindow(w.WindowMinutes, position)
+		if existing, taken := out.Windows[key]; taken {
+			return fmt.Errorf(
+				"codex snapshot at %s: %s window and an earlier window both key on %q (%.2f%% vs %.2f%%); refusing to drop one",
+				snapAt.UTC().Format(time.RFC3339), position, key, existing.UsedPercent, w.UsedPercent)
+		}
 		out.Windows[key] = &usagestore.LimitWindow{
 			UsedPercent:   w.UsedPercent,
 			WindowMinutes: w.WindowMinutes,
 			ResetsAt:      w.ResetsAt,
 		}
+		return nil
 	}
-	addWindow(snap.Primary)
-	addWindow(snap.Secondary)
-	return out
+	if err := addWindow(snap.Primary, WindowPrimary); err != nil {
+		return nil, err
+	}
+	if err := addWindow(snap.Secondary, WindowSecondary); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func keyForWindow(min *int64) string {
+// keyForWindow names a window by its length, falling back to its position when the
+// provider omitted window_minutes. position must be unique across a single snapshot.
+func keyForWindow(min *int64, position string) string {
 	if min == nil {
-		return "unknown"
+		return position
 	}
 	switch *min {
 	case 300:
