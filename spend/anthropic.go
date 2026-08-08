@@ -122,7 +122,6 @@ func (c *AnthropicKeyCollector) Fetch() (*AnthropicResult, error) {
 	res := &AnthropicResult{
 		AdminKeyHint: adminHint,
 		Keys:         make([]usagestore.KeyMeta, 0, len(keys)),
-		Daily:        make([]usagestore.DailySpend, 0, len(keys)*FetchDays),
 	}
 	for _, k := range keys {
 		res.Keys = append(res.Keys, usagestore.KeyMeta{
@@ -136,24 +135,59 @@ func (c *AnthropicKeyCollector) Fetch() (*AnthropicResult, error) {
 		})
 	}
 
-	// One daily row per (key, day) — buckets where the key had any token activity.
+	daily, err := dailyFromBuckets(usage, now, c.OnUnknownModel)
+	if err != nil {
+		return nil, fmt.Errorf("usage_report: %w", err)
+	}
+	res.Daily = daily
+	return res, nil
+}
+
+// bucketDate turns a usage_report bucket's starting_at into the YYYY-MM-DD key
+// SaveDailySpend rows are stored under.
+//
+// It parses rather than slices. The obvious spelling is starting_at[:10], and
+// that is wrong twice over: it panics outright on a value shorter than ten
+// bytes (an omitted starting_at is the empty string, and Go's zero value gives
+// no hint that the field was ever missing), and on anything else it produces a
+// ten-byte prefix that is not checked to be a date at all. The prefix then
+// becomes the primary key half of a spend row, so a malformed timestamp would
+// quietly file real dollars under a nonsense day and go on matching itself on
+// every later fetch. Truncating the string more carefully does not help — the
+// value is parsed as data, not printed, so the only honest repair is to refuse
+// a bucket whose date we cannot read.
+func bucketDate(startingAt string) (string, error) {
+	t, err := time.Parse(time.RFC3339, startingAt)
+	if err != nil {
+		return "", fmt.Errorf("bucket starting_at %q: %w", startingAt, err)
+	}
+	return t.UTC().Format("2006-01-02"), nil
+}
+
+// dailyFromBuckets partitions usage_report buckets into one cost row per
+// (api key, day). Buckets where a key had no token activity yield no row.
+func dailyFromBuckets(usage []rawUsageBucket, fetchedAt int64, onUnknownModel func(string)) ([]usagestore.DailySpend, error) {
+	daily := make([]usagestore.DailySpend, 0, len(usage))
 	for _, b := range usage {
-		date := b.StartingAt[:10] // YYYY-MM-DD
+		date, err := bucketDate(b.StartingAt)
+		if err != nil {
+			return nil, err
+		}
 		perKey := map[string]float64{}
 		for _, r := range b.Results {
-			perKey[r.APIKeyID] += costFromTokens(r, c.OnUnknownModel)
+			perKey[r.APIKeyID] += costFromTokens(r, onUnknownModel)
 		}
 		for apiKeyID, cost := range perKey {
-			res.Daily = append(res.Daily, usagestore.DailySpend{
+			daily = append(daily, usagestore.DailySpend{
 				Provider:  "anthropic",
 				APIKeyID:  apiKeyID,
 				Date:      date,
 				TotalUSD:  cost,
-				FetchedAt: now,
+				FetchedAt: fetchedAt,
 			})
 		}
 	}
-	return res, nil
+	return daily, nil
 }
 
 // adminKeyHint returns "sk-ant-admin01-…" style fingerprint for display.
