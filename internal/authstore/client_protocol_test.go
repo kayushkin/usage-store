@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,8 +184,19 @@ func TestTheStatusesAuthStoreUsesForFailureAllBecomeErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := newRecordingAuthStore(t, tc.status, tc.body)
-			if _, err := c.ResolveByID("cred_nope", "probe"); err == nil {
+			_, err := c.ResolveByID("cred_nope", "probe")
+			if err == nil {
 				t.Fatalf("status %d was treated as success", tc.status)
+			}
+			// Asserting the status reaches the message is what gives this
+			// test teeth. auth-store's 404 body is VALID JSON that decodes
+			// to a credential with an empty api_key, so a client that
+			// stopped checking the status would still fail — with "has no
+			// api_key" instead of "404", blaming the credential for a
+			// lookup that never found one. Confirmed by mutation: without
+			// this assertion, deleting the status check goes unnoticed.
+			if !strings.Contains(err.Error(), fmt.Sprint(tc.status)) {
+				t.Errorf("error = %q, want it to carry the status %d", err, tc.status)
 			}
 		})
 	}
