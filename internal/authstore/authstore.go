@@ -72,18 +72,15 @@ func (c *Client) ListCredentials() ([]CredentialSummary, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("auth-store list returned %d: %s", resp.StatusCode, string(body))
 	}
+	// auth-store's handleListCredentials writes []credentialView directly, so
+	// the body is a bare JSON array. There is no {"credentials": [...]}
+	// variant to tolerate — a decode failure here means the route changed
+	// shape and should be loud rather than silently empty.
 	var arr []CredentialSummary
-	if err := json.Unmarshal(body, &arr); err == nil {
-		return arr, nil
-	}
-	// Tolerate the {credentials: [...]} variant.
-	var wrap struct {
-		Credentials []CredentialSummary `json:"credentials"`
-	}
-	if err := json.Unmarshal(body, &wrap); err != nil {
+	if err := json.Unmarshal(body, &arr); err != nil {
 		return nil, fmt.Errorf("parse list: %w", err)
 	}
-	return wrap.Credentials, nil
+	return arr, nil
 }
 
 // ResolveByID fetches a credential and returns its API key. Reason is logged
