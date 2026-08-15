@@ -304,13 +304,19 @@ CASES = [
         "the account's 24h header accumulates the 7d figure",
         [("		out.Total24h += row.Total24h", "		out.Total24h += row.Total7d")],
     ),
+    # The two window columns are SWAPPED rather than one overwritten. Assigning
+    # per7 twice would leave per24 declared and unused, and Go makes that a
+    # compile error — a case that never runs, which the score line reports as a
+    # coverage hole that is not there (223rd, 225th).
     Case(
-        "a key row's 24h column carries its 7d total",
-        [("			Total24h:     per24[m.APIKeyID],", "			Total24h:     per7[m.APIKeyID],")],
+        "a key row's 24h and 7d columns are swapped",
+        [("			Total24h:     per24[m.APIKeyID],\n			Total7d:      per7[m.APIKeyID],",
+          "			Total24h:     per7[m.APIKeyID],\n			Total7d:      per24[m.APIKeyID],")],
     ),
     Case(
-        "a key row's 30d column carries the 7d total",
-        [("			Total30d:     per30[m.APIKeyID],", "			Total30d:     per7[m.APIKeyID],")],
+        "a key row's 7d and 30d columns are swapped",
+        [("			Total7d:      per7[m.APIKeyID],\n			Total30d:     per30[m.APIKeyID],",
+          "			Total7d:      per30[m.APIKeyID],\n			Total30d:     per7[m.APIKeyID],")],
     ),
     Case(
         "the fetch time is dropped from every key row",
@@ -394,18 +400,32 @@ CASES = [
         [("	if err != nil {\n		writeErr(w, http.StatusBadRequest, err)\n		return\n	}\n	writeJSON(w, map[string]int64{\"id\": id})",
           "	if err != nil {\n		writeErr(w, http.StatusInternalServerError, err)\n		return\n	}\n	writeJSON(w, map[string]int64{\"id\": id})")],
     ),
+    # `"id": 0` would orphan the id the store handed back; multiplying keeps the
+    # variable live and returns the same useless zero.
     Case(
         "the id of the stored deposit is not returned",
-        [('	writeJSON(w, map[string]int64{"id": id})', '	writeJSON(w, map[string]int64{"id": 0})')],
+        [('	writeJSON(w, map[string]int64{"id": id})', '	writeJSON(w, map[string]int64{"id": id * 0})')],
     ),
     Case(
         "a top-up id that is not a number deletes row zero and reports success",
         [("	id, err := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n	if err != nil {",
           "	id, err := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n	if err != nil && false {")],
     ),
+    # The needle carries the delete above it: `w.WriteHeader(http.StatusNoContent)`
+    # alone appears here AND in the preflight branch of ServeHTTP, and the engine
+    # would have sabotaged whichever came first.
     Case(
         "a delete answers 200 with an empty body instead of 204",
-        [("	w.WriteHeader(http.StatusNoContent)", "	w.WriteHeader(http.StatusOK)")],
+        [("""	if err := s.store.DeleteTopup(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)""",
+          """	if err := s.store.DeleteTopup(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)""")],
     ),
 
     # ---- the raw route ----
