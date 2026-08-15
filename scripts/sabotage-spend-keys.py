@@ -59,6 +59,15 @@ title — has now not once failed to pay.
 on answers about the wrong tree, and it fails in the direction that closes a row
 without testing it. This branch is cut from `main`.
 
+Result, 2026-08-15: **70/74 real mechanisms caught, both controls behaved.** The
+four uncaught rows are all declared below with their reasons — three are guards
+dominated by their own callee or by a conversion that no input can separate from
+its absence, and one is a copy that exists to show what the assertions do NOT
+rest on. Round one scored lower with three `compile error` rows and one abort:
+every compile error was a case that DELETED a value another line still used, and
+the abort was `w.WriteHeader(http.StatusNoContent)`, which appears in the delete
+handler and in the preflight branch both.
+
 What makes this mechanism worth more than a coverage row: it is the only code in
 the fleet whose output is money the user is deciding by. Two figures on one
 response are computed by different routes through the store — the window totals
