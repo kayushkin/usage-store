@@ -159,6 +159,17 @@ func (c *AnthropicKeyCollector) Fetch() (*AnthropicResult, error) {
 // adminKeyHint returns "sk-ant-admin01-…" style fingerprint for display.
 // 14 chars + ellipsis + last 4 keeps it identifiable without logging the
 // secret.
+//
+// Both cuts land on a rune boundary. The hint travels to SaveAdminHint and out
+// again as the admin_key_hint field of GET /api/spend/keys, so a cut through a
+// multi-byte rune would put a replacement character on :8185's wire with no
+// error raised anywhere — encoding/json substitutes U+FFFD rather than
+// failing. Every Anthropic admin-key format is ASCII, so this is unswept
+// rather than on fire.
+//
+// The hint is display-only: nothing parses it and nothing keys on it, so a
+// budget shortened by up to three bytes is the right repair here. A cut whose
+// result were parsed or used as a key would need a refusal instead.
 func (c *AnthropicKeyCollector) adminKeyHint() (string, error) {
 	k, err := c.APIKeyFn()
 	if err != nil {
@@ -167,7 +178,7 @@ func (c *AnthropicKeyCollector) adminKeyHint() (string, error) {
 	if len(k) < 24 {
 		return k, nil
 	}
-	return k[:14] + "..." + k[len(k)-4:], nil
+	return truncateAtRuneBoundary(k, 14) + "..." + suffixAtRuneBoundary(k, 4), nil
 }
 
 func (c *AnthropicKeyCollector) listKeys() ([]rawAPIKey, error) {
