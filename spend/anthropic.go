@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	usagestore "github.com/kayushkin/usage-store"
@@ -170,13 +171,26 @@ func (c *AnthropicKeyCollector) Fetch() (*AnthropicResult, error) {
 // The hint is display-only: nothing parses it and nothing keys on it, so a
 // budget shortened by up to three bytes is the right repair here. A cut whose
 // result were parsed or used as a key would need a refusal instead.
+//
+// A key too short to cut is masked entirely rather than returned. Returning it
+// would publish the secret on the one field whose whole purpose is to avoid
+// publishing it — the hint is served as admin_key_hint by GET /api/spend/keys,
+// so the branch leaks over HTTP and not merely into a log. No real Anthropic
+// admin key is this short, so the branch fires on a truncated, placeholder or
+// misconfigured key, which is also when someone is most likely to be looking at
+// the spend page. All-stars is the answer auth-store.MaskSecret, aiauth.MaskKey
+// and apiauth.MaskToken already give for the same case; usage-store was the one
+// site on this box that dissented.
 func (c *AnthropicKeyCollector) adminKeyHint() (string, error) {
 	k, err := c.APIKeyFn()
 	if err != nil {
 		return "", err
 	}
 	if len(k) < 24 {
-		return k, nil
+		// Star count is the byte length, matching the three siblings named
+		// above. It concedes the key's length, which those already concede,
+		// and no admin key reaching this branch is a valid credential anyway.
+		return strings.Repeat("*", len(k)), nil
 	}
 	return truncateAtRuneBoundary(k, 14) + "..." + suffixAtRuneBoundary(k, 4), nil
 }
