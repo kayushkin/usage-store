@@ -160,6 +160,9 @@ func (s *Store) ListKeyMeta(provider string) ([]KeyMeta, error) {
 		}
 		out = append(out, k)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -227,6 +230,9 @@ func (s *Store) PerKeyTotals(provider string, sinceUnix int64) (map[string]float
 		}
 		out[id] = total
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -274,6 +280,9 @@ func (s *Store) ListTopups(provider string) ([]Topup, error) {
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

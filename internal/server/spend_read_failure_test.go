@@ -86,14 +86,31 @@ func TestAFailedPerKeyTotalsReadNamesItsProvider(t *testing.T) {
 
 // The underlying error must reach the line. A log line that says a read failed
 // without saying how is the same dead end as no line at all.
+//
+// The assertion is per-LINE on purpose. The sibling reads (list meta, list
+// topups) already log the identical "database is closed" text, so a
+// whole-buffer Contains is satisfied by their lines and cannot detect the
+// per-key-totals line dropping the error. It scored SURVIVED against exactly
+// that mutation before this was narrowed.
 func TestAFailedPerKeyTotalsReadCarriesTheUnderlyingError(t *testing.T) {
 	logged := captureLog(t)
 	srv := unreadableSpendServer(t)
 
 	do(t, srv, "GET", "/api/usage/spend/keys", "")
 
-	if !strings.Contains(logged.String(), "database is closed") {
-		t.Errorf("the store's own error never reached the log.\ngot:\n%s", logged.String())
+	var perKeyLines []string
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.HasPrefix(line, "[spend] per-key totals ") {
+			perKeyLines = append(perKeyLines, line)
+		}
+	}
+	if len(perKeyLines) == 0 {
+		t.Fatalf("no per-key-totals line at all to carry an error.\ngot:\n%s", logged.String())
+	}
+	for _, line := range perKeyLines {
+		if !strings.Contains(line, "database is closed") {
+			t.Errorf("a per-key-totals failure line does not carry the store's own error: %q", line)
+		}
 	}
 }
 
