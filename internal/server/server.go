@@ -277,8 +277,6 @@ func (s *Server) handleSpendKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// assembleProvider builds one ProviderAccount: pulls KeyMeta + per-window
-// spend totals + top-ups and combines them.
 // perKeyTotalsLoggingReadFailure reads one spend window and reports a failed
 // read to the log, naming the provider and the window, before answering with
 // whatever the store returned. The three windows used to discard their errors
@@ -298,6 +296,8 @@ func (s *Server) perKeyTotalsLoggingReadFailure(provider, window string, sinceUn
 	return totals
 }
 
+// assembleProvider builds one ProviderAccount: pulls KeyMeta + per-window
+// spend totals + top-ups and combines them.
 func (s *Server) assembleProvider(provider string, configured bool) ProviderAccount {
 	out := ProviderAccount{
 		Configured:   configured,
