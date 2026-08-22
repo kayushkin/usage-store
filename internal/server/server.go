@@ -279,6 +279,25 @@ func (s *Server) handleSpendKeys(w http.ResponseWriter, r *http.Request) {
 
 // assembleProvider builds one ProviderAccount: pulls KeyMeta + per-window
 // spend totals + top-ups and combines them.
+// perKeyTotalsLoggingReadFailure reads one spend window and reports a failed
+// read to the log, naming the provider and the window, before answering with
+// whatever the store returned. The three windows used to discard their errors
+// into `_`, so an unreadable spend_daily table rendered every figure as $0.00
+// and printed nothing at all — a plausible answer for an account that has spent
+// nothing, and the direction that costs the user money.
+//
+// It logs rather than propagates because assembleProvider has no error channel
+// and handleSpendKeys always writes 200. Giving the endpoint one is a wire
+// contract change and is the open half of card 0e5d003c; this is the half that
+// was never in question.
+func (s *Server) perKeyTotalsLoggingReadFailure(provider, window string, sinceUnix int64) map[string]float64 {
+	totals, err := s.store.PerKeyTotals(provider, sinceUnix)
+	if err != nil {
+		log.Printf("[spend] per-key totals %s %s: %v", provider, window, err)
+	}
+	return totals
+}
+
 func (s *Server) assembleProvider(provider string, configured bool) ProviderAccount {
 	out := ProviderAccount{
 		Configured:   configured,
@@ -294,9 +313,9 @@ func (s *Server) assembleProvider(provider string, configured bool) ProviderAcco
 	day7 := now.AddDate(0, 0, -7).Truncate(24 * time.Hour).Unix()
 	day30 := now.AddDate(0, 0, -30).Truncate(24 * time.Hour).Unix()
 
-	per24, _ := s.store.PerKeyTotals(provider, day1)
-	per7, _ := s.store.PerKeyTotals(provider, day7)
-	per30, _ := s.store.PerKeyTotals(provider, day30)
+	per24 := s.perKeyTotalsLoggingReadFailure(provider, "24h", day1)
+	per7 := s.perKeyTotalsLoggingReadFailure(provider, "7d", day7)
+	per30 := s.perKeyTotalsLoggingReadFailure(provider, "30d", day30)
 
 	metas, err := s.store.ListKeyMeta(provider)
 	if err != nil {
