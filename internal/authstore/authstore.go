@@ -9,8 +9,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
+
+// escapePathSegment makes a value safe to interpolate into ONE path segment of
+// a URL. The credential ids this client is handed come from auth-store's own
+// /api/credentials answer and are not checked on this side, so a "/", "?" or
+// "#" in one would otherwise change which endpoint gets addressed — with this
+// client's bearer token and audit headers attached to the wrong request.
+//
+// url.PathEscape, not url.QueryEscape: the value lands in a path, where a space
+// is "%20" and QueryEscape's "+" would be a literal plus. Escaping is chosen by
+// where the value lands, not by what the value is. Every sink in this repo is a
+// URL — it imports os/exec nowhere — so PathEscape leaving "&" and "$" intact
+// (both are legal path sub-delims, RFC 3986 s3.3) is correct here.
+func escapePathSegment(s string) string { return url.PathEscape(s) }
 
 // Client resolves credentials by ID. All calls require BearerToken plus the
 // X-Auth-App / X-Auth-Reason audit headers — auth-store rejects key-touching
@@ -89,8 +103,8 @@ func (c *Client) ListCredentials() ([]CredentialSummary, error) {
 // ResolveByID fetches a credential and returns its API key. Reason is logged
 // in auth-store's audit trail.
 func (c *Client) ResolveByID(id, reason string) (*Resolved, error) {
-	url := fmt.Sprintf("%s/api/credentials/%s/resolve", c.BaseURL, id)
-	req, err := http.NewRequest("GET", url, nil)
+	u := fmt.Sprintf("%s/api/credentials/%s/resolve", c.BaseURL, escapePathSegment(id))
+	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
