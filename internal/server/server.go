@@ -12,6 +12,7 @@ import (
 	usagestore "github.com/kayushkin/usage-store"
 	"github.com/kayushkin/usage-store/anthropic"
 	"github.com/kayushkin/usage-store/codex"
+	"github.com/kayushkin/usage-store/internal/boundedtext"
 	"github.com/kayushkin/usage-store/spend"
 
 	_ "modernc.org/sqlite"
@@ -441,7 +442,11 @@ func (s *Server) handleAddTopup(w http.ResponseWriter, r *http.Request) {
 	if occurredAt == 0 && req.OccurredAtStr != "" {
 		t, err := time.Parse("2006-01-02", req.OccurredAtStr)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("occurred_at_str: %w", err))
+			// Bounded: occurred_at_str is caller-supplied, this service has no
+			// auth and listens on every interface, and time.Parse quotes its
+			// whole input back inside its own error twice. Measured against the
+			// deployed binary, a 5 000-byte value rendered a 10 096-byte body.
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("occurred_at_str: %w", boundedtext.Error(err)))
 			return
 		}
 		occurredAt = t.UTC().Unix()
