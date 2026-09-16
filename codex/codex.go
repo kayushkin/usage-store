@@ -52,9 +52,9 @@ type eventPayload struct {
 }
 
 type rolloutLine struct {
-	Timestamp string         `json:"timestamp"`
-	Type      string         `json:"type"`
-	Payload   *eventPayload  `json:"payload"`
+	Timestamp string        `json:"timestamp"`
+	Type      string        `json:"type"`
+	Payload   *eventPayload `json:"payload"`
 }
 
 // Reader walks the local Codex sessions directory.
@@ -93,6 +93,15 @@ func (r *Reader) Latest() (*usagestore.ProviderLimits, []byte, error) {
 		return nil, nil, nil
 	}
 
+	// A rollout is named and filed by the day its session STARTED, but Codex keeps
+	// appending to it for as long as the session lives. A session started yesterday
+	// can hold a newer snapshot than one started today, so neither the directory nor
+	// the file order decides: the snapshot with the newest line timestamp wins.
+	var (
+		bestSnap *rateLimits
+		bestRaw  []byte
+		bestTime time.Time
+	)
 	for _, f := range files {
 		snap, raw, ts, err := scanRollout(f)
 		if err != nil {
@@ -102,87 +111,62 @@ func (r *Reader) Latest() (*usagestore.ProviderLimits, []byte, error) {
 		if snap == nil {
 			continue
 		}
-		out := normalise(snap, ts)
-		if r.MaxAge > 0 {
-			staleAt := ts.Add(r.MaxAge).Unix()
-			out.StaleAfter = &staleAt
+		if bestSnap == nil || ts.After(bestTime) {
+			bestSnap, bestRaw, bestTime = snap, raw, ts
 		}
-		return out, raw, nil
 	}
-
-	return nil, nil, nil
+	if bestSnap == nil {
+		return nil, nil, nil
+	}
+	out := normalise(bestSnap, bestTime)
+	if r.MaxAge > 0 {
+		staleAt := bestTime.Add(r.MaxAge).Unix()
+		out.StaleAfter = &staleAt
+	}
+	return out, bestRaw, nil
 }
 
 // recentRollouts returns up to `limit` rollout JSONL paths, newest first by mtime.
 //
-// To avoid walking thousands of historical files, we descend YYYY/MM/DD
-// in reverse-sorted order and stop once we've collected enough recent files.
+// It orders every rollout by modification time, not by the YYYY/MM/DD directory it
+// sits in: that directory records when the session started, and a long session
+// keeps writing to it days later. Walking a few hundred directory entries is cheap
+// next to reporting an old snapshot as the latest one.
 func recentRollouts(root string, limit int) ([]string, error) {
-	years, err := readDirSortedDesc(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	type entry struct {
+		path string
+		mod  time.Time
+	}
+	var entries []entry
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root && os.IsNotExist(err) {
+				return fs.SkipAll
+			}
+			return err
 		}
+		if d.IsDir() || filepath.Ext(d.Name()) != ".jsonl" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		entries = append(entries, entry{path: path, mod: info.ModTime()})
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	var out []string
-	for _, y := range years {
-		months, err := readDirSortedDesc(filepath.Join(root, y))
-		if err != nil {
-			continue
-		}
-		for _, m := range months {
-			days, err := readDirSortedDesc(filepath.Join(root, y, m))
-			if err != nil {
-				continue
-			}
-			for _, d := range days {
-				dir := filepath.Join(root, y, m, d)
-				files, err := os.ReadDir(dir)
-				if err != nil {
-					continue
-				}
-				type entry struct {
-					path string
-					mod  time.Time
-				}
-				var es []entry
-				for _, fe := range files {
-					if fe.IsDir() || filepath.Ext(fe.Name()) != ".jsonl" {
-						continue
-					}
-					info, err := fe.Info()
-					if err != nil {
-						continue
-					}
-					es = append(es, entry{path: filepath.Join(dir, fe.Name()), mod: info.ModTime()})
-				}
-				sort.Slice(es, func(i, j int) bool { return es[i].mod.After(es[j].mod) })
-				for _, e := range es {
-					out = append(out, e.path)
-					if len(out) >= limit {
-						return out, nil
-					}
-				}
-			}
-		}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].mod.After(entries[j].mod) })
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.path
 	}
 	return out, nil
-}
-
-func readDirSortedDesc(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-	return names, nil
 }
 
 // scanRollout reads a JSONL file and returns the last `rate_limits` payload,
