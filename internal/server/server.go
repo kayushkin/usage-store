@@ -214,13 +214,13 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, snap)
 	case "codex":
-		snap, raw, err := s.codex.Latest()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
+		if s.codex == nil {
+			writeErr(w, http.StatusServiceUnavailable, fmt.Errorf("codex limits are off: USAGE_STORE_CODEX_COMMAND is not set or not found"))
 			return
 		}
-		if snap == nil {
-			http.Error(w, `{"error":"no codex rollout found"}`, http.StatusNotFound)
+		snap, raw, err := s.codex.Read(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
 			return
 		}
 		if err := s.store.SaveLimits(*snap, raw); err != nil {
@@ -245,17 +245,17 @@ type SpendKeysResponse struct {
 }
 
 type ProviderAccount struct {
-	Configured     bool       `json:"configured"`
-	AdminKeyHint   string     `json:"admin_key_hint"`
-	Total24h       float64    `json:"total_usd_24h"`
-	Total7d        float64    `json:"total_usd_7d"`
-	Total30d       float64    `json:"total_usd_30d"`
-	Topups         []usagestore.Topup `json:"topups"`
-	TopupsTotalUSD float64    `json:"topups_total_usd"`
-	SpendSinceBaseline float64 `json:"spend_since_baseline"`
-	RemainingUSD   *float64   `json:"remaining_usd"`  // nil when no top-ups
-	BalanceSince   *int64     `json:"balance_since"`  // unix sec; nil when no top-ups
-	Keys           []KeyRow   `json:"keys"`
+	Configured         bool               `json:"configured"`
+	AdminKeyHint       string             `json:"admin_key_hint"`
+	Total24h           float64            `json:"total_usd_24h"`
+	Total7d            float64            `json:"total_usd_7d"`
+	Total30d           float64            `json:"total_usd_30d"`
+	Topups             []usagestore.Topup `json:"topups"`
+	TopupsTotalUSD     float64            `json:"topups_total_usd"`
+	SpendSinceBaseline float64            `json:"spend_since_baseline"`
+	RemainingUSD       *float64           `json:"remaining_usd"` // nil when no top-ups
+	BalanceSince       *int64             `json:"balance_since"` // unix sec; nil when no top-ups
+	Keys               []KeyRow           `json:"keys"`
 }
 
 type KeyRow struct {
@@ -424,11 +424,11 @@ func (s *Server) handleListTopups(w http.ResponseWriter, r *http.Request) {
 }
 
 type topupRequest struct {
-	Provider   string  `json:"provider"`
-	AmountUSD  float64 `json:"amount_usd"`
-	OccurredAt int64   `json:"occurred_at"` // unix sec, optional → defaults to now
-	OccurredAtStr string `json:"occurred_at_str"` // YYYY-MM-DD, optional → parsed UTC midnight
-	Note       string  `json:"note"`
+	Provider      string  `json:"provider"`
+	AmountUSD     float64 `json:"amount_usd"`
+	OccurredAt    int64   `json:"occurred_at"`     // unix sec, optional → defaults to now
+	OccurredAtStr string  `json:"occurred_at_str"` // YYYY-MM-DD, optional → parsed UTC midnight
+	Note          string  `json:"note"`
 }
 
 func (s *Server) handleAddTopup(w http.ResponseWriter, r *http.Request) {

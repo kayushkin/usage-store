@@ -11,7 +11,7 @@ import (
 //
 // Field semantics intentionally match the union of:
 //   - Anthropic /api/oauth/usage (utilization 0-100, resets_at ISO string)
-//   - Codex RateLimitWindow (used_percent 0-100 float, window_minutes, resets_at unix sec)
+//   - Codex app-server rate limits (usedPercent 0-100, windowDurationMins, resetsAt unix sec)
 //
 // Both shapes are normalised here. ResetsAt is always unix seconds.
 type LimitWindow struct {
@@ -27,7 +27,7 @@ type ProviderLimits struct {
 	Tier       string                  `json:"tier,omitempty"`        // anthropic rate_limit_tier
 	Windows    map[string]*LimitWindow `json:"windows"`               // keyed by window name
 	SnapshotAt int64                   `json:"snapshot_at"`           // unix seconds
-	Source     string                  `json:"source"`                // "api", "rollout"
+	Source     string                  `json:"source"`                // "api", "app-server"
 	StaleAfter *int64                  `json:"stale_after,omitempty"` // unix seconds when the snapshot becomes stale
 }
 
@@ -40,14 +40,14 @@ func (p *ProviderLimits) IsStale() bool {
 }
 
 // providerMaxAge governs how long a snapshot is considered fresh for a given
-// provider. Anthropic comes from a live API so never goes stale. Codex comes
-// from local rollout files written only on user-initiated sessions, so it
-// expires after CodexMaxAge.
+// provider. Anthropic has no budget. Codex is read live from `codex app-server`
+// every refresh, so a codex snapshot older than its budget means the reads have
+// been failing — the autoworker skips a stale snapshot rather than trust it.
 //
 // Kept as a small in-package map so the LatestLimits reconstruction can mark
 // staleness consistently regardless of which collector saved the row.
 var providerMaxAge = map[string]time.Duration{
-	"codex": 2 * time.Hour,
+	"codex": 10 * time.Minute,
 }
 
 // migrateLimits creates the limit_snapshots table.
@@ -142,12 +142,12 @@ func (s *Store) LatestLimits(provider string) (*ProviderLimits, error) {
 	out := &ProviderLimits{Provider: provider, Windows: map[string]*LimitWindow{}, SnapshotAt: snapAt}
 	for rows.Next() {
 		var (
-			key         string
-			usedPct     float64
-			winMin      sql.NullInt64
-			resets      sql.NullInt64
-			plan, tier  sql.NullString
-			source      string
+			key        string
+			usedPct    float64
+			winMin     sql.NullInt64
+			resets     sql.NullInt64
+			plan, tier sql.NullString
+			source     string
 		)
 		if err := rows.Scan(&key, &usedPct, &winMin, &resets, &plan, &tier, &source); err != nil {
 			return nil, err
@@ -179,11 +179,11 @@ func (s *Store) LatestLimits(provider string) (*ProviderLimits, error) {
 
 // LimitHistoryFilter scopes a history query.
 type LimitHistoryFilter struct {
-	Provider  string // required
-	Window    string // optional
-	Since     int64  // unix seconds; 0 = no lower bound
-	Until     int64  // unix seconds; 0 = no upper bound
-	Limit     int    // 0 = no limit
+	Provider string // required
+	Window   string // optional
+	Since    int64  // unix seconds; 0 = no lower bound
+	Until    int64  // unix seconds; 0 = no upper bound
+	Limit    int    // 0 = no limit
 }
 
 // LimitHistoryRow is one snapshot row returned by HistoryLimits.

@@ -12,7 +12,11 @@ type Config struct {
 	LimitsDBPath    string        // limit_snapshots DB (canonical for usage-store)
 	TokensDBPath    string        // token aggregation DB (read-only; currently model-store's)
 	RefreshInterval time.Duration // background refresh cadence (limits)
-	CodexMaxAge     time.Duration // when a codex rollout snapshot becomes stale
+	// CodexCommand is the codex executable (a path or a name on PATH) that
+	// usage-store starts as `codex app-server` to read the live limits. Empty
+	// turns codex limits off. CodexTimeout bounds one read.
+	CodexCommand string
+	CodexTimeout time.Duration
 
 	// Spend (per-API-key cost via admin endpoints). Admin keys are
 	// auto-discovered in auth-store by api_key prefix — no per-provider env
@@ -29,7 +33,8 @@ func Load() Config {
 		LimitsDBPath:         expandHome(envOr("USAGE_STORE_DB", "~/.config/usage-store/usage.db")),
 		TokensDBPath:         expandHome(envOr("USAGE_STORE_TOKENS_DB", "~/.config/model-store/store.db")),
 		RefreshInterval:      envDur("USAGE_STORE_REFRESH_INTERVAL", 60*time.Second),
-		CodexMaxAge:          envDur("USAGE_STORE_CODEX_MAX_AGE", 2*time.Hour),
+		CodexCommand:         os.Getenv("USAGE_STORE_CODEX_COMMAND"),
+		CodexTimeout:         envDur("USAGE_STORE_CODEX_TIMEOUT", 30*time.Second),
 		AuthStoreURL:         envOr("AUTH_STORE_URL", "http://127.0.0.1:8303"),
 		AuthStoreToken:       os.Getenv("AUTH_STORE_TOKEN"),
 		SpendRefreshInterval: envDur("USAGE_STORE_SPEND_REFRESH_INTERVAL", time.Hour),

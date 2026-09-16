@@ -8,7 +8,7 @@ Token usage tracking + subscription-limit aggregator. Library + service.
 
 Sub-packages:
 - `anthropic` — fetches Claude OAuth subscription usage from `https://api.anthropic.com/api/oauth/usage` using the token in `~/.claude/.credentials.json`.
-- `codex` — extracts the latest `RateLimitSnapshot` written by the Codex CLI into `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. No network calls; the snapshot is only as fresh as your last Codex session (`StaleAfter` is set on returned snapshots so callers can stale-skip).
+- `codex` — starts `codex app-server` (the Codex CLI's JSON-RPC interface) each refresh and asks it `account/rateLimits/read`. The CLI answers from OpenAI with its own login and refreshes that login itself, so usage-store holds no token, and the numbers cover every Codex client on the account, not only sessions run on this host. Needs `USAGE_STORE_CODEX_COMMAND` (a path or a name on `PATH`; the npm `codex` also needs `node` on `PATH`) — unset or not found, codex limits are off and the startup log says so. `USAGE_STORE_CODEX_TIMEOUT` bounds one read (default 30s).
 
 ## Service (`usage-store-server`)
 
@@ -47,4 +47,4 @@ Builds the binary, installs to `~/bin/usage-store-server`, drops the systemd uni
 
 ## Snapshot schema
 
-`limit_snapshots` rows are append-only. Each `SaveLimits` call writes one row per window; reconstruct a `ProviderLimits` with `LatestLimits(provider)` (returns the most recent `snapshot_at` group). `StaleAfter` is computed at read time from the per-provider freshness budget (`codex` = 2h, `anthropic` = none).
+`limit_snapshots` rows are append-only. Each `SaveLimits` call writes one row per window; reconstruct a `ProviderLimits` with `LatestLimits(provider)` (returns the most recent `snapshot_at` group). `StaleAfter` is computed at read time from the per-provider freshness budget (`codex` = 10m — ten missed refreshes, since a live read should never be older than one interval; `anthropic` = none).

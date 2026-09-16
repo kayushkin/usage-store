@@ -1,22 +1,26 @@
-// Package codex extracts Codex CLI subscription limits from local rollout JSONL files.
+// Package codex reads the live Codex subscription limits from the Codex CLI.
 //
-// The Codex CLI writes a RateLimitSnapshot into every session rollout under
-// ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl on each `token_count` event.
-// Reading the latest such file is enough to recover the current 5-hour and
-// weekly utilisation without making any API calls.
+// It starts `codex app-server`, the JSON-RPC interface the Codex IDE extension
+// uses, and asks it `account/rateLimits/read`. The CLI answers from OpenAI's
+// servers with its own stored login and refreshes that login itself, so this
+// package never reads ~/.codex/auth.json or holds a token.
 //
-// Caveat: the snapshot is only as fresh as the last Codex interaction. The
-// caller decides what counts as stale (StaleAfter on the returned snapshot).
+// The answer covers every Codex client on the account — other machines, the IDE
+// extension, cloud tasks — which the local session logs this package used to
+// read could not see.
 package codex
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"sort"
+	"io"
+	"os/exec"
+	"strings"
+	"syscall"
 	"time"
 
 	usagestore "github.com/kayushkin/usage-store"
@@ -24,245 +28,254 @@ import (
 
 // Window names exposed in ProviderLimits.Windows.
 //
-// Codex names them generically as primary/secondary; we map by window_minutes:
-// 300 → five_hour, 10080 → weekly. Anything else falls through with its raw key.
+// The CLI names its windows primary and secondary; they are keyed by length:
+// 300 minutes → five_hour, 10080 → weekly, anything else → "<n>m". A window that
+// omits its length keys on its position, the only fact left that tells it apart.
+// Windows is read by programs (the autoworker gates on Windows["weekly"]), so two
+// windows must never share a key.
 const (
-	WindowFiveHour = "five_hour"
-	WindowWeekly   = "weekly"
+	WindowFiveHour  = "five_hour"
+	WindowWeekly    = "weekly"
+	WindowPrimary   = "primary"
+	WindowSecondary = "secondary"
 )
 
-// rateLimitWindow matches the wire format inside rollout JSONL.
+// SourceAppServer is the ProviderLimits.Source this package reports.
+const SourceAppServer = "app-server"
+
+// rateLimitWindow is one window as `account/rateLimits/read` returns it.
 type rateLimitWindow struct {
-	UsedPercent   float64 `json:"used_percent"`
-	WindowMinutes *int64  `json:"window_minutes"`
-	ResetsAt      *int64  `json:"resets_at"` // unix seconds
+	UsedPercent        float64 `json:"usedPercent"`
+	WindowDurationMins *int64  `json:"windowDurationMins"`
+	ResetsAt           *int64  `json:"resetsAt"` // unix seconds
 }
 
-type rateLimits struct {
-	LimitID   string           `json:"limit_id"`
-	LimitName *string          `json:"limit_name"`
+type rateLimitSnapshot struct {
+	LimitID   string           `json:"limitId"`
 	Primary   *rateLimitWindow `json:"primary"`
 	Secondary *rateLimitWindow `json:"secondary"`
-	PlanType  *string          `json:"plan_type"`
+	PlanType  *string          `json:"planType"`
 }
 
-type eventPayload struct {
-	Type       string      `json:"type"`
-	RateLimits *rateLimits `json:"rate_limits"`
+type rateLimitsReadResult struct {
+	RateLimits *rateLimitSnapshot `json:"rateLimits"`
 }
 
-type rolloutLine struct {
-	Timestamp string        `json:"timestamp"`
-	Type      string        `json:"type"`
-	Payload   *eventPayload `json:"payload"`
-}
-
-// Reader walks the local Codex sessions directory.
+// Reader asks a Codex CLI for the account's current limits.
 type Reader struct {
-	// SessionsDir defaults to ~/.codex/sessions when empty.
-	SessionsDir string
-	// MaxAge is how long a rollout snapshot is considered fresh.
-	// Snapshots older than MaxAge are still returned, but with StaleAfter set in the past.
-	MaxAge time.Duration
+	// Command is the resolved path of the codex executable.
+	Command string
+	// Timeout bounds one whole exchange, from starting the process to its exit.
+	Timeout time.Duration
 }
 
-// New returns a Reader with sane defaults: ~/.codex/sessions, 2h MaxAge.
-func New() *Reader {
-	home, _ := os.UserHomeDir()
-	return &Reader{
-		SessionsDir: filepath.Join(home, ".codex", "sessions"),
-		MaxAge:      2 * time.Hour,
+// New resolves command (a path, or a name looked up on PATH) and returns a Reader
+// for it. It fails when the executable cannot be found.
+func New(command string, timeout time.Duration) (*Reader, error) {
+	if command == "" {
+		return nil, errors.New("codex command is empty")
 	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return nil, fmt.Errorf("resolve codex command %q: %w", command, err)
+	}
+	return &Reader{Command: resolved, Timeout: timeout}, nil
 }
 
-// Latest scans the configured sessions directory and returns the most recent
-// rate-limit snapshot recorded by the Codex CLI.
-//
-// Returns (nil, nil) if no rollout files exist at all.
-func (r *Reader) Latest() (*usagestore.ProviderLimits, []byte, error) {
-	if r.SessionsDir == "" {
-		home, _ := os.UserHomeDir()
-		r.SessionsDir = filepath.Join(home, ".codex", "sessions")
+// Read starts `codex app-server`, asks it for the account's rate limits and
+// returns them with the raw JSON-RPC result.
+func (r *Reader) Read(ctx context.Context) (*usagestore.ProviderLimits, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
+	defer cancel()
+
+	// read-only sandbox and no approvals: this process only answers questions.
+	cmd := exec.CommandContext(ctx, r.Command, "-s", "read-only", "-a", "never", "app-server")
+	// The npm `codex` is a node wrapper around the native binary. Give the pair its
+	// own process group so a timeout kills both, not just the wrapper.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("codex app-server stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("codex app-server stdout: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, fmt.Errorf("start codex app-server: %w", err)
 	}
 
-	files, err := recentRollouts(r.SessionsDir, 10)
+	raw, exchangeErr := exchange(stdin, stdout)
+	// Closing stdin is how a client says it is done; the server exits on EOF.
+	stdin.Close()
+	waitErr := cmd.Wait()
+
+	if exchangeErr != nil {
+		if ctx.Err() != nil {
+			exchangeErr = fmt.Errorf("%w (timed out after %s)", exchangeErr, r.Timeout)
+		}
+		return nil, nil, fmt.Errorf("codex app-server: %w%s", exchangeErr, stderrSuffix(&stderr))
+	}
+	if waitErr != nil {
+		return nil, nil, fmt.Errorf("codex app-server exited badly after answering: %w%s", waitErr, stderrSuffix(&stderr))
+	}
+
+	var result rateLimitsReadResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, nil, fmt.Errorf("decode account/rateLimits/read result: %w", err)
+	}
+	if result.RateLimits == nil {
+		return nil, nil, fmt.Errorf("account/rateLimits/read returned no rateLimits: %s", raw)
+	}
+	out, err := normalise(result.RateLimits, time.Now())
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(files) == 0 {
-		return nil, nil, nil
-	}
-
-	// A rollout is named and filed by the day its session STARTED, but Codex keeps
-	// appending to it for as long as the session lives. A session started yesterday
-	// can hold a newer snapshot than one started today, so neither the directory nor
-	// the file order decides: the snapshot with the newest line timestamp wins.
-	var (
-		bestSnap *rateLimits
-		bestRaw  []byte
-		bestTime time.Time
-	)
-	for _, f := range files {
-		snap, raw, ts, err := scanRollout(f)
-		if err != nil {
-			// Skip unreadable files; the next one might be fine.
-			continue
-		}
-		if snap == nil {
-			continue
-		}
-		if bestSnap == nil || ts.After(bestTime) {
-			bestSnap, bestRaw, bestTime = snap, raw, ts
-		}
-	}
-	if bestSnap == nil {
-		return nil, nil, nil
-	}
-	out := normalise(bestSnap, bestTime)
-	if r.MaxAge > 0 {
-		staleAt := bestTime.Add(r.MaxAge).Unix()
-		out.StaleAfter = &staleAt
-	}
-	return out, bestRaw, nil
+	return out, raw, nil
 }
 
-// recentRollouts returns up to `limit` rollout JSONL paths, newest first by mtime.
-//
-// It orders every rollout by modification time, not by the YYYY/MM/DD directory it
-// sits in: that directory records when the session started, and a long session
-// keeps writing to it days later. Walking a few hundred directory entries is cheap
-// next to reporting an old snapshot as the latest one.
-func recentRollouts(root string, limit int) ([]string, error) {
-	type entry struct {
-		path string
-		mod  time.Time
+// rpcMessage covers the three shapes the server writes: a response (id with
+// result or error), a notification (method, no id) and a server request.
+type rpcMessage struct {
+	ID     *int64          `json:"id"`
+	Method string          `json:"method"`
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+const (
+	initializeRequestID = 1
+	rateLimitsRequestID = 2
+)
+
+// exchange runs the handshake and the one request over newline-delimited
+// JSON-RPC, and returns the raw result of account/rateLimits/read.
+func exchange(stdin io.Writer, stdout io.Reader) (json.RawMessage, error) {
+	lines := bufio.NewScanner(stdout)
+	lines.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	send := func(message map[string]any) error {
+		message["jsonrpc"] = "2.0"
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			return err
+		}
+		_, err = stdin.Write(append(encoded, '\n'))
+		return err
 	}
-	var entries []entry
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if path == root && os.IsNotExist(err) {
-				return fs.SkipAll
-			}
-			return err
-		}
-		if d.IsDir() || filepath.Ext(d.Name()) != ".jsonl" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		entries = append(entries, entry{path: path, mod: info.ModTime()})
-		return nil
-	})
-	if err != nil {
+
+	if err := send(map[string]any{
+		"id":     initializeRequestID,
+		"method": "initialize",
+		"params": map[string]any{"clientInfo": map[string]any{"name": "usage-store", "version": "1"}},
+	}); err != nil {
+		return nil, fmt.Errorf("send initialize: %w", err)
+	}
+	if _, err := awaitResponse(lines, initializeRequestID, "initialize"); err != nil {
 		return nil, err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].mod.After(entries[j].mod) })
-	if len(entries) > limit {
-		entries = entries[:limit]
+	if err := send(map[string]any{"method": "initialized"}); err != nil {
+		return nil, fmt.Errorf("send initialized: %w", err)
 	}
-	out := make([]string, len(entries))
-	for i, e := range entries {
-		out[i] = e.path
+	if err := send(map[string]any{"id": rateLimitsRequestID, "method": "account/rateLimits/read"}); err != nil {
+		return nil, fmt.Errorf("send account/rateLimits/read: %w", err)
 	}
-	return out, nil
+	return awaitResponse(lines, rateLimitsRequestID, "account/rateLimits/read")
 }
 
-// scanRollout reads a JSONL file and returns the last `rate_limits` payload,
-// the raw JSON of that line, and the timestamp parsed from the line.
-func scanRollout(path string) (*rateLimits, []byte, time.Time, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, time.Time{}, err
-	}
-	defer f.Close()
-
-	var (
-		lastSnap *rateLimits
-		lastRaw  []byte
-		lastTime time.Time
-	)
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		var rl rolloutLine
-		if err := json.Unmarshal(line, &rl); err != nil {
+// awaitResponse reads until the response to id arrives, skipping notifications.
+func awaitResponse(lines *bufio.Scanner, id int64, method string) (json.RawMessage, error) {
+	for lines.Scan() {
+		var message rpcMessage
+		if err := json.Unmarshal(lines.Bytes(), &message); err != nil {
+			return nil, fmt.Errorf("undecodable line while waiting for %s: %w: %.200s", method, err, lines.Text())
+		}
+		if message.ID == nil || *message.ID != id || message.Method != "" {
 			continue
 		}
-		if rl.Payload == nil || rl.Payload.RateLimits == nil {
-			continue
+		if message.Error != nil {
+			return nil, fmt.Errorf("%s failed: %d %s", method, message.Error.Code, message.Error.Message)
 		}
-		// Copy line because scanner reuses its buffer.
-		rawCopy := make([]byte, len(line))
-		copy(rawCopy, line)
-		lastSnap = rl.Payload.RateLimits
-		lastRaw = rawCopy
-		if t, err := time.Parse(time.RFC3339Nano, rl.Timestamp); err == nil {
-			lastTime = t
-		}
+		return message.Result, nil
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, time.Time{}, err
+	if err := lines.Err(); err != nil {
+		return nil, fmt.Errorf("read while waiting for %s: %w", method, err)
 	}
-	if lastSnap != nil && lastTime.IsZero() {
-		// Fall back to file mtime if the line was missing a usable timestamp.
-		if info, err := os.Stat(path); err == nil {
-			lastTime = info.ModTime()
-		}
-	}
-	return lastSnap, lastRaw, lastTime, nil
+	return nil, fmt.Errorf("output ended before the %s response", method)
 }
 
-// normalise maps Codex's primary/secondary windows onto stable keys.
-func normalise(snap *rateLimits, snapAt time.Time) *usagestore.ProviderLimits {
+func stderrSuffix(stderr *bytes.Buffer) string {
+	text := strings.TrimSpace(stderr.String())
+	if text == "" {
+		return ""
+	}
+	if len(text) > 2000 {
+		text = text[len(text)-2000:]
+	}
+	return "; stderr: " + text
+}
+
+// normalise maps the CLI's primary/secondary windows onto stable keys.
+//
+// It fails rather than let one window overwrite another: two windows sharing a key
+// means the snapshot contradicts itself, and keeping the last one would report one
+// limit where the provider stated two.
+func normalise(snap *rateLimitSnapshot, fetchedAt time.Time) (*usagestore.ProviderLimits, error) {
 	out := &usagestore.ProviderLimits{
 		Provider:   "codex",
-		SnapshotAt: snapAt.Unix(),
-		Source:     "rollout",
+		SnapshotAt: fetchedAt.Unix(),
+		Source:     SourceAppServer,
 		Windows:    map[string]*usagestore.LimitWindow{},
 	}
 	if snap.PlanType != nil {
 		out.PlanType = *snap.PlanType
 	}
-	addWindow := func(w *rateLimitWindow) {
+	addWindow := func(w *rateLimitWindow, position string) error {
 		if w == nil {
-			return
+			return nil
 		}
-		key := keyForWindow(w.WindowMinutes)
+		key := keyForWindow(w.WindowDurationMins, position)
+		if existing, taken := out.Windows[key]; taken {
+			return fmt.Errorf(
+				"codex limits at %s: %s window and an earlier window both key on %q (%.2f%% vs %.2f%%); refusing to drop one",
+				fetchedAt.UTC().Format(time.RFC3339), position, key, existing.UsedPercent, w.UsedPercent)
+		}
 		out.Windows[key] = &usagestore.LimitWindow{
 			UsedPercent:   w.UsedPercent,
-			WindowMinutes: w.WindowMinutes,
+			WindowMinutes: w.WindowDurationMins,
 			ResetsAt:      w.ResetsAt,
 		}
+		return nil
 	}
-	addWindow(snap.Primary)
-	addWindow(snap.Secondary)
-	return out
+	if err := addWindow(snap.Primary, WindowPrimary); err != nil {
+		return nil, err
+	}
+	if err := addWindow(snap.Secondary, WindowSecondary); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func keyForWindow(min *int64) string {
-	if min == nil {
-		return "unknown"
+// keyForWindow names a window by its length, or by its position when the length
+// is absent. position must be unique within one snapshot.
+func keyForWindow(minutes *int64, position string) string {
+	if minutes == nil {
+		return position
 	}
-	switch *min {
+	switch *minutes {
 	case 300:
 		return WindowFiveHour
 	case 10080:
 		return WindowWeekly
 	default:
-		return fmt.Sprintf("%dm", *min)
+		return fmt.Sprintf("%dm", *minutes)
 	}
-}
-
-// Walk is a tiny helper exposed for tests.
-func Walk(root string, fn func(path string, info fs.FileInfo) error) error {
-	return filepath.Walk(root, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return fn(path, info)
-	})
 }

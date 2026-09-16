@@ -29,8 +29,14 @@ func main() {
 	defer store.Close()
 
 	ant := anthropic.New()
-	cx := codex.New()
-	cx.MaxAge = cfg.CodexMaxAge
+	// A nil reader turns codex limits off; the rest of the service still runs.
+	var cx *codex.Reader
+	if cfg.CodexCommand == "" {
+		log.Printf("[usage-store] codex limits OFF: USAGE_STORE_CODEX_COMMAND is not set")
+	} else if cx, err = codex.New(cfg.CodexCommand, cfg.CodexTimeout); err != nil {
+		log.Printf("[usage-store] codex limits OFF: %v", err)
+		cx = nil
+	}
 
 	sc := buildSpendCollectors(cfg)
 
@@ -54,9 +60,9 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("[usage-store] listening on %s (limits db: %s, tokens db: %s, refresh: %s, spend refresh: %s, anthropic-admin: %s)",
+	log.Printf("[usage-store] listening on %s (limits db: %s, tokens db: %s, refresh: %s, spend refresh: %s, anthropic-admin: %s, codex: %s)",
 		cfg.ListenAddr, cfg.LimitsDBPath, cfg.TokensDBPath, cfg.RefreshInterval, cfg.SpendRefreshInterval,
-		boolStr(sc.Anthropic != nil))
+		boolStr(sc.Anthropic != nil), boolStr(cx != nil))
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[usage-store] server error: %v", err)
 	}
@@ -136,10 +142,10 @@ func runRefresher(ctx context.Context, s *usagestore.Store, ant *anthropic.Colle
 		} else if err := s.SaveLimits(*snap, raw); err != nil {
 			log.Printf("[refresh] anthropic save: %v", err)
 		}
-		if snap, raw, err := cx.Latest(); err != nil {
-			log.Printf("[refresh] codex: %v", err)
-		} else if snap != nil {
-			if err := s.SaveLimits(*snap, raw); err != nil {
+		if cx != nil {
+			if snap, raw, err := cx.Read(ctx); err != nil {
+				log.Printf("[refresh] codex: %v", err)
+			} else if err := s.SaveLimits(*snap, raw); err != nil {
 				log.Printf("[refresh] codex save: %v", err)
 			}
 		}
