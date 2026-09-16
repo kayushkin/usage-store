@@ -176,9 +176,8 @@ step "launch server on :$PORT (temp DBs, temp HOME, unreachable auth-store)"
 USAGE_STORE_LISTEN_ADDR=":$PORT" \
 USAGE_STORE_DB="$LIMITS_DB" \
 USAGE_STORE_TOKENS_DB="$TOKENS_DB" \
-USAGE_STORE_REFRESH_INTERVAL="1h" \
+USAGE_STORE_LIMITS_IDLE_REFRESH_INTERVAL="1h" \
 USAGE_STORE_SPEND_REFRESH_INTERVAL="1h" \
-USAGE_STORE_CODEX_MAX_AGE="2h" \
 AUTH_STORE_URL="http://127.0.0.1:1" \
 AUTH_STORE_TOKEN="e2e-smoke-not-a-real-token" \
 HOME="$FAKE_HOME" \
@@ -235,6 +234,12 @@ CODE=$(req "$BODY" GET "$BASE/api/usage/limits")
 [ "$(jq -r '.anthropic' "$BODY")" = "null" ] \
   || fail "anthropic snapshot is non-null — the run reached the live Anthropic API: $(cat "$BODY")"
 echo "    limits: $(cat "$BODY")"
+
+step "POST /api/usage/limits/watch — the usage page marks itself open"
+CODE=$(req "$BODY" POST "$BASE/api/usage/limits/watch")
+[ "$CODE" = "204" ] || fail "POST /api/usage/limits/watch → $CODE (want 204): $(cat "$BODY")"
+grep -q "usage page open" "$TMP_DIR/server.log" 2>/dev/null || { sleep 1; grep -q "usage page open" "$TMP_DIR/server.log"; } \
+  || fail "watch did not switch the limits refresher to the watched interval: $(tail -5 "$TMP_DIR/server.log")"
 
 step "GET /api/usage/limits/{provider} + /history — wildcard routes"
 CODE=$(req "$BODY" GET "$BASE/api/usage/limits/anthropic")
@@ -322,7 +327,7 @@ kill -0 "$SERVER_PID" 2>/dev/null || fail "server died during the run"
 step "SUCCESS"
 echo "    routes asserted: /health, /api/usage, /api/usage/limits,"
 echo "                     /api/usage/limits/{provider}, /api/usage/limits/{provider}/history,"
-echo "                     /api/usage/limits/refresh, /api/usage/spend/keys,"
+echo "                     /api/usage/limits/refresh, /api/usage/limits/watch, /api/usage/spend/keys,"
 echo "                     /api/usage/spend/keys/{provider}/{api_key_id}/raw,"
 echo "                     /api/usage/spend/topups (GET/POST/DELETE)"
 echo "    server log: $TMP_DIR/server.log"

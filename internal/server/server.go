@@ -23,6 +23,8 @@ type Server struct {
 	tokensDBPath   string
 	anthropic      *anthropic.Collector
 	codex          *codex.Reader
+	limitsWatch    LimitsWatch
+	limitsStaleAge time.Duration
 	spendAnthropic *spend.AnthropicKeyCollector // nil when no admin key was discovered
 	mux            *http.ServeMux
 
@@ -32,16 +34,25 @@ type Server struct {
 	adminHints map[string]string
 }
 
+// LimitsWatch is told when the usage page is being looked at.
+type LimitsWatch interface {
+	MarkWatched()
+}
+
 type SpendCollectors struct {
 	Anthropic *spend.AnthropicKeyCollector
 }
 
-func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx *codex.Reader, sc SpendCollectors) *Server {
+// New builds the server. limitsStaleAge is how old a limits snapshot may be
+// before responses mark it stale.
+func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx *codex.Reader, limitsWatch LimitsWatch, limitsStaleAge time.Duration, sc SpendCollectors) *Server {
 	srv := &Server{
 		store:          s,
 		tokensDBPath:   tokensDBPath,
 		anthropic:      ant,
 		codex:          cx,
+		limitsWatch:    limitsWatch,
+		limitsStaleAge: limitsStaleAge,
 		spendAnthropic: sc.Anthropic,
 		adminHints:     map[string]string{},
 		mux:            http.NewServeMux(),
@@ -62,6 +73,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/usage/limits/{provider}", s.handleProviderLimits)
 	s.mux.HandleFunc("GET /api/usage/limits/{provider}/history", s.handleHistory)
 	s.mux.HandleFunc("POST /api/usage/limits/refresh", s.handleRefresh)
+	s.mux.HandleFunc("POST /api/usage/limits/watch", s.handleLimitsWatch)
 	s.mux.HandleFunc("GET /api/usage/spend/keys", s.handleSpendKeys)
 	s.mux.HandleFunc("GET /api/usage/spend/keys/{provider}/{api_key_id}/raw", s.handleSpendKeyRaw)
 	s.mux.HandleFunc("POST /api/usage/spend/refresh", s.handleSpendRefresh)
@@ -149,9 +161,26 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, fmt.Errorf("latest %s: %w", p, err))
 			return
 		}
+		s.markStaleness(snap)
 		out[p] = snap
 	}
 	writeJSON(w, out)
+}
+
+// markStaleness sets StaleAfter from the snapshot's age budget.
+func (s *Server) markStaleness(snap *usagestore.ProviderLimits) {
+	if snap == nil {
+		return
+	}
+	staleAfter := snap.SnapshotAt + int64(s.limitsStaleAge.Seconds())
+	snap.StaleAfter = &staleAfter
+}
+
+// handleLimitsWatch records that the usage page is open, so limits are read
+// on the watched interval for a while.
+func (s *Server) handleLimitsWatch(w http.ResponseWriter, r *http.Request) {
+	s.limitsWatch.MarkWatched()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleProviderLimits(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +194,7 @@ func (s *Server) handleProviderLimits(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"no snapshot"}`, http.StatusNotFound)
 		return
 	}
+	s.markStaleness(snap)
 	writeJSON(w, snap)
 }
 

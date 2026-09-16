@@ -23,9 +23,10 @@ Endpoints (all under `/api/usage`):
 | GET | `/api/usage/limits/{provider}` | Latest snapshot for one provider |
 | GET | `/api/usage/limits/{provider}/history?window=&since=&until=&limit=` | Snapshot history (for graphing) |
 | POST | `/api/usage/limits/refresh?provider=anthropic\|codex` | Force a fresh fetch + persist |
+| POST | `/api/usage/limits/watch` | The usage page is open: read limits on the watched interval for `USAGE_STORE_LIMITS_WATCHER_EXPIRY`. 204. |
 | GET | `/health` | Liveness |
 
-Background ticker fires `Anthropic.Fetch` + `Codex.Latest` every `USAGE_STORE_REFRESH_INTERVAL` (default `60s`) and writes a row per (provider, window).
+The limits refresher (`internal/limitsrefresh`) reads each provider every `USAGE_STORE_LIMITS_IDLE_REFRESH_INTERVAL` (15m) and writes a row per (provider, window). While the usage page is open and visible it calls `POST /api/usage/limits/watch` about once a minute, and reads speed up to every `USAGE_STORE_LIMITS_WATCHED_REFRESH_INTERVAL` (2m) until `USAGE_STORE_LIMITS_WATCHER_EXPIRY` (3m) passes without a call. Anthropic's usage endpoint shares its rate limit with every Claude Code process on the login, which is why nothing polls it faster. A failed read waits one watched interval, doubling on each further failure up to the idle interval; a success clears it.
 
 ### Env vars
 
@@ -34,8 +35,11 @@ Background ticker fires `Anthropic.Fetch` + `Codex.Latest` every `USAGE_STORE_RE
 | `USAGE_STORE_LISTEN_ADDR` | `:8185` |
 | `USAGE_STORE_DB` | `~/.config/usage-store/usage.db` (limit snapshots) |
 | `USAGE_STORE_TOKENS_DB` | `~/.config/model-store/store.db` (token-usage source, read-only) |
-| `USAGE_STORE_REFRESH_INTERVAL` | `60s` |
-| `USAGE_STORE_CODEX_MAX_AGE` | `2h` |
+| `USAGE_STORE_LIMITS_IDLE_REFRESH_INTERVAL` | `15m` |
+| `USAGE_STORE_LIMITS_WATCHED_REFRESH_INTERVAL` | `2m` |
+| `USAGE_STORE_LIMITS_WATCHER_EXPIRY` | `3m` |
+| `USAGE_STORE_CODEX_COMMAND` | unset (codex limits off) |
+| `USAGE_STORE_CODEX_TIMEOUT` | `30s` |
 
 ### Deploy
 
@@ -47,4 +51,4 @@ Builds the binary, installs to `~/bin/usage-store-server`, drops the systemd uni
 
 ## Snapshot schema
 
-`limit_snapshots` rows are append-only. Each `SaveLimits` call writes one row per window; reconstruct a `ProviderLimits` with `LatestLimits(provider)` (returns the most recent `snapshot_at` group). `StaleAfter` is computed at read time from the per-provider freshness budget (`codex` = 10m — ten missed refreshes, since a live read should never be older than one interval; `anthropic` = none).
+`limit_snapshots` rows are append-only. Each `SaveLimits` call writes one row per window; reconstruct a `ProviderLimits` with `LatestLimits(provider)` (returns the most recent `snapshot_at` group). `StaleAfter` is set by the server at read time, for every provider, to `snapshot_at` plus three idle intervals (45m by default): three missed idle reads in a row. The autoworker skips a stale snapshot.

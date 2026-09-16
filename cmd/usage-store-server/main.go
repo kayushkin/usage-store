@@ -15,6 +15,7 @@ import (
 	"github.com/kayushkin/usage-store/codex"
 	"github.com/kayushkin/usage-store/internal/authstore"
 	"github.com/kayushkin/usage-store/internal/config"
+	"github.com/kayushkin/usage-store/internal/limitsrefresh"
 	"github.com/kayushkin/usage-store/internal/server"
 	"github.com/kayushkin/usage-store/spend"
 )
@@ -40,11 +41,25 @@ func main() {
 
 	sc := buildSpendCollectors(cfg)
 
-	srv := server.New(store, cfg.TokensDBPath, ant, cx, sc)
+	limitsProviders := []limitsrefresh.Provider{{
+		Name:  "anthropic",
+		Fetch: func(context.Context) (*usagestore.ProviderLimits, []byte, error) { return ant.Fetch() },
+	}}
+	if cx != nil {
+		limitsProviders = append(limitsProviders, limitsrefresh.Provider{Name: "codex", Fetch: cx.Read})
+	}
+	limitsRefresher := limitsrefresh.New(limitsrefresh.Intervals{
+		Idle:          cfg.LimitsIdleRefreshInterval,
+		Watched:       cfg.LimitsWatchedRefreshInterval,
+		WatcherExpiry: cfg.LimitsWatcherExpiry,
+	}, store.SaveLimits, limitsProviders)
+	limitsStaleAge := time.Duration(cfg.LimitsStaleAfterIdleIntervals) * cfg.LimitsIdleRefreshInterval
+
+	srv := server.New(store, cfg.TokensDBPath, ant, cx, limitsRefresher, limitsStaleAge, sc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runRefresher(ctx, store, ant, cx, cfg.RefreshInterval)
+	go limitsRefresher.Run(ctx, 15*time.Second)
 	go runSpendRefresher(ctx, store, srv, sc, cfg.SpendRefreshInterval)
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
@@ -60,8 +75,8 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("[usage-store] listening on %s (limits db: %s, tokens db: %s, refresh: %s, spend refresh: %s, anthropic-admin: %s, codex: %s)",
-		cfg.ListenAddr, cfg.LimitsDBPath, cfg.TokensDBPath, cfg.RefreshInterval, cfg.SpendRefreshInterval,
+	log.Printf("[usage-store] listening on %s (limits db: %s, tokens db: %s, limits refresh: %s idle / %s watched, spend refresh: %s, anthropic-admin: %s, codex: %s)",
+		cfg.ListenAddr, cfg.LimitsDBPath, cfg.TokensDBPath, cfg.LimitsIdleRefreshInterval, cfg.LimitsWatchedRefreshInterval, cfg.SpendRefreshInterval,
 		boolStr(sc.Anthropic != nil), boolStr(cx != nil))
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[usage-store] server error: %v", err)
@@ -132,36 +147,6 @@ func boolStr(b bool) string {
 		return "on"
 	}
 	return "off"
-}
-
-// runRefresher polls each provider on the configured interval and persists snapshots.
-func runRefresher(ctx context.Context, s *usagestore.Store, ant *anthropic.Collector, cx *codex.Reader, interval time.Duration) {
-	tick := func() {
-		if snap, raw, err := ant.Fetch(); err != nil {
-			log.Printf("[refresh] anthropic: %v", err)
-		} else if err := s.SaveLimits(*snap, raw); err != nil {
-			log.Printf("[refresh] anthropic save: %v", err)
-		}
-		if cx != nil {
-			if snap, raw, err := cx.Read(ctx); err != nil {
-				log.Printf("[refresh] codex: %v", err)
-			} else if err := s.SaveLimits(*snap, raw); err != nil {
-				log.Printf("[refresh] codex save: %v", err)
-			}
-		}
-	}
-
-	tick()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			tick()
-		}
-	}
 }
 
 // runSpendRefresher polls each configured provider's per-key spend on a

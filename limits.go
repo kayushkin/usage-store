@@ -28,7 +28,7 @@ type ProviderLimits struct {
 	Windows    map[string]*LimitWindow `json:"windows"`               // keyed by window name
 	SnapshotAt int64                   `json:"snapshot_at"`           // unix seconds
 	Source     string                  `json:"source"`                // "api", "app-server"
-	StaleAfter *int64                  `json:"stale_after,omitempty"` // unix seconds when the snapshot becomes stale
+	StaleAfter *int64                  `json:"stale_after,omitempty"` // unix seconds when the snapshot becomes stale; set by the server, not stored
 }
 
 // IsStale returns true if StaleAfter is set and in the past.
@@ -37,17 +37,6 @@ func (p *ProviderLimits) IsStale() bool {
 		return false
 	}
 	return time.Now().Unix() > *p.StaleAfter
-}
-
-// providerMaxAge governs how long a snapshot is considered fresh for a given
-// provider. Anthropic has no budget. Codex is read live from `codex app-server`
-// every refresh, so a codex snapshot older than its budget means the reads have
-// been failing — the autoworker skips a stale snapshot rather than trust it.
-//
-// Kept as a small in-package map so the LatestLimits reconstruction can mark
-// staleness consistently regardless of which collector saved the row.
-var providerMaxAge = map[string]time.Duration{
-	"codex": 10 * time.Minute,
 }
 
 // migrateLimits creates the limit_snapshots table.
@@ -169,10 +158,6 @@ func (s *Store) LatestLimits(provider string) (*ProviderLimits, error) {
 			out.Tier = tier.String
 		}
 		out.Source = source
-	}
-	if maxAge, ok := providerMaxAge[provider]; ok {
-		stale := snapAt + int64(maxAge.Seconds())
-		out.StaleAfter = &stale
 	}
 	return out, nil
 }

@@ -8,10 +8,17 @@ import (
 )
 
 type Config struct {
-	ListenAddr      string
-	LimitsDBPath    string        // limit_snapshots DB (canonical for usage-store)
-	TokensDBPath    string        // token aggregation DB (read-only; currently model-store's)
-	RefreshInterval time.Duration // background refresh cadence (limits)
+	ListenAddr   string
+	LimitsDBPath string // limit_snapshots DB (canonical for usage-store)
+	TokensDBPath string // token aggregation DB (read-only; currently model-store's)
+	// Subscription limits are read every LimitsIdleRefreshInterval, and every
+	// LimitsWatchedRefreshInterval while the usage page is open. The page marks
+	// itself open about once a minute; a mark counts for LimitsWatcherExpiry.
+	// A snapshot is stale after LimitsStaleAfterIdleIntervals idle intervals.
+	LimitsIdleRefreshInterval     time.Duration
+	LimitsWatchedRefreshInterval  time.Duration
+	LimitsWatcherExpiry           time.Duration
+	LimitsStaleAfterIdleIntervals int
 	// CodexCommand is the codex executable (a path or a name on PATH) that
 	// usage-store starts as `codex app-server` to read the live limits. Empty
 	// turns codex limits off. CodexTimeout bounds one read.
@@ -29,15 +36,18 @@ type Config struct {
 
 func Load() Config {
 	return Config{
-		ListenAddr:           envOr("USAGE_STORE_LISTEN_ADDR", ":8185"),
-		LimitsDBPath:         expandHome(envOr("USAGE_STORE_DB", "~/.config/usage-store/usage.db")),
-		TokensDBPath:         expandHome(envOr("USAGE_STORE_TOKENS_DB", "~/.config/model-store/store.db")),
-		RefreshInterval:      envDur("USAGE_STORE_REFRESH_INTERVAL", 60*time.Second),
-		CodexCommand:         os.Getenv("USAGE_STORE_CODEX_COMMAND"),
-		CodexTimeout:         envDur("USAGE_STORE_CODEX_TIMEOUT", 30*time.Second),
-		AuthStoreURL:         envOr("AUTH_STORE_URL", "http://127.0.0.1:8303"),
-		AuthStoreToken:       os.Getenv("AUTH_STORE_TOKEN"),
-		SpendRefreshInterval: envDur("USAGE_STORE_SPEND_REFRESH_INTERVAL", time.Hour),
+		ListenAddr:                    envOr("USAGE_STORE_LISTEN_ADDR", ":8185"),
+		LimitsDBPath:                  expandHome(envOr("USAGE_STORE_DB", "~/.config/usage-store/usage.db")),
+		TokensDBPath:                  expandHome(envOr("USAGE_STORE_TOKENS_DB", "~/.config/model-store/store.db")),
+		LimitsIdleRefreshInterval:     envDur("USAGE_STORE_LIMITS_IDLE_REFRESH_INTERVAL", 15*time.Minute),
+		LimitsWatchedRefreshInterval:  envDur("USAGE_STORE_LIMITS_WATCHED_REFRESH_INTERVAL", 2*time.Minute),
+		LimitsWatcherExpiry:           envDur("USAGE_STORE_LIMITS_WATCHER_EXPIRY", 3*time.Minute),
+		LimitsStaleAfterIdleIntervals: 3,
+		CodexCommand:                  os.Getenv("USAGE_STORE_CODEX_COMMAND"),
+		CodexTimeout:                  envDur("USAGE_STORE_CODEX_TIMEOUT", 30*time.Second),
+		AuthStoreURL:                  envOr("AUTH_STORE_URL", "http://127.0.0.1:8303"),
+		AuthStoreToken:                os.Getenv("AUTH_STORE_TOKEN"),
+		SpendRefreshInterval:          envDur("USAGE_STORE_SPEND_REFRESH_INTERVAL", time.Hour),
 	}
 }
 
