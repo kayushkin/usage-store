@@ -318,6 +318,29 @@ CODE=$(req "$BODY" DELETE "$BASE/api/usage/spend/topups/not-a-number")
 [ "$CODE" = "400" ] || fail "DELETE topups/not-a-number → $CODE (want 400): $(cat "$BODY")"
 echo "    deleted; list is empty again"
 
+step "GET /settings — describes this process, and never serves the secret"
+# The registry is what main read its configuration from, so the port this smoke
+# chose must be the value served, from the environment. A registry that was
+# built and never read from would show the default instead.
+CODE=$(req "$BODY" GET "$BASE/settings")
+[ "$CODE" = "200" ] || fail "GET /settings → $CODE (want 200): $(cat "$BODY")"
+[ "$(jq -r '.service' "$BODY")" = "usage-store" ] || fail "GET /settings service: $(cat "$BODY")"
+LISTEN=$(jq -c '.settings[] | select(.key=="listen_address")' "$BODY")
+[ "$(jq -r '.value' <<<"$LISTEN")" = ":$PORT" ] && [ "$(jq -r '.source' <<<"$LISTEN")" = "environment" ] \
+  || fail "GET /settings listen_address should be :$PORT from the environment: $LISTEN"
+IDLE=$(jq -c '.settings[] | select(.key=="limits_idle_refresh_interval")' "$BODY")
+[ "$(jq -r '.value' <<<"$IDLE")" = "1h" ] && [ "$(jq -r '.source' <<<"$IDLE")" = "environment" ] \
+  || fail "GET /settings limits_idle_refresh_interval should be 1h from the environment: $IDLE"
+WATCHED=$(jq -c '.settings[] | select(.key=="limits_watched_refresh_interval")' "$BODY")
+[ "$(jq -r '.source' <<<"$WATCHED")" = "default" ] \
+  || fail "GET /settings limits_watched_refresh_interval should be the default: $WATCHED"
+if grep -q "e2e-smoke-not-a-real-token" "$BODY"; then
+  fail "GET /settings served AUTH_STORE_TOKEN's value"
+fi
+CODE=$(req "$BODY" PUT "$BASE/settings/listen_address" -H 'Content-Type: application/json' -d '{"value":":1"}')
+[ "$CODE" != "200" ] || fail "PUT /settings/listen_address → 200: a write route is mounted"
+echo "    listen_address=:$PORT (environment), secret withheld, no write route"
+
 step "server survived every route"
 kill -0 "$SERVER_PID" 2>/dev/null || fail "server died during the run"
 
@@ -329,5 +352,5 @@ echo "    routes asserted: /health, /api/usage, /api/usage/limits,"
 echo "                     /api/usage/limits/{provider}, /api/usage/limits/{provider}/history,"
 echo "                     /api/usage/limits/refresh, /api/usage/limits/watch, /api/usage/spend/keys,"
 echo "                     /api/usage/spend/keys/{provider}/{api_key_id}/raw,"
-echo "                     /api/usage/spend/topups (GET/POST/DELETE)"
+echo "                     /api/usage/spend/topups (GET/POST/DELETE), /settings"
 echo "    server log: $TMP_DIR/server.log"

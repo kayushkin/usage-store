@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kayushkin/llm-bridge/servicesettings"
 	usagestore "github.com/kayushkin/usage-store"
 	"github.com/kayushkin/usage-store/anthropic"
 	"github.com/kayushkin/usage-store/codex"
@@ -21,7 +22,17 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	settings, err := config.NewSettingsRegistry(servicesettings.ProcessEnvironment())
+	if err != nil {
+		log.Fatalf("[usage-store] read settings: %v", err)
+	}
+	if err := settings.CheckRequired(); err != nil {
+		log.Fatalf("[usage-store] read settings: %v", err)
+	}
+	cfg, err := config.Load(settings)
+	if err != nil {
+		log.Fatalf("[usage-store] read settings: %v", err)
+	}
 
 	store, err := usagestore.Open(cfg.LimitsDBPath)
 	if err != nil {
@@ -55,7 +66,7 @@ func main() {
 	}, store.SaveLimits, limitsProviders)
 	limitsStaleAge := time.Duration(cfg.LimitsStaleAfterIdleIntervals) * cfg.LimitsIdleRefreshInterval
 
-	srv := server.New(store, cfg.TokensDBPath, ant, cx, limitsRefresher, limitsStaleAge, sc)
+	srv := server.New(store, cfg.TokensDBPath, ant, cx, limitsRefresher, limitsStaleAge, sc, settings)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kayushkin/llm-bridge/servicesettings"
 	usagestore "github.com/kayushkin/usage-store"
 	"github.com/kayushkin/usage-store/anthropic"
 	"github.com/kayushkin/usage-store/codex"
@@ -26,6 +27,7 @@ type Server struct {
 	limitsWatch    LimitsWatch
 	limitsStaleAge time.Duration
 	spendAnthropic *spend.AnthropicKeyCollector // nil when no admin key was discovered
+	settings       *servicesettings.Registry
 	mux            *http.ServeMux
 
 	// Cached per-provider admin-key hint from the most recent spend fetch.
@@ -44,8 +46,12 @@ type SpendCollectors struct {
 }
 
 // New builds the server. limitsStaleAge is how old a limits snapshot may be
-// before responses mark it stale.
-func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx *codex.Reader, limitsWatch LimitsWatch, limitsStaleAge time.Duration, sc SpendCollectors) *Server {
+// before responses mark it stale. settings is what GET /settings describes; a
+// nil one panics here, at boot, rather than at the first read of the route.
+func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx *codex.Reader, limitsWatch LimitsWatch, limitsStaleAge time.Duration, sc SpendCollectors, settings *servicesettings.Registry) *Server {
+	if settings == nil {
+		panic("usage-store: server.New needs the settings registry that GET /settings serves")
+	}
 	srv := &Server{
 		store:          s,
 		tokensDBPath:   tokensDBPath,
@@ -54,6 +60,7 @@ func New(s *usagestore.Store, tokensDBPath string, ant *anthropic.Collector, cx 
 		limitsWatch:    limitsWatch,
 		limitsStaleAge: limitsStaleAge,
 		spendAnthropic: sc.Anthropic,
+		settings:       settings,
 		adminHints:     map[string]string{},
 		mux:            http.NewServeMux(),
 	}
@@ -81,6 +88,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/usage/spend/topups", s.handleAddTopup)
 	s.mux.HandleFunc("DELETE /api/usage/spend/topups/{id}", s.handleDeleteTopup)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	// Read-only, and as open as every other route. PUT /settings/{key} is not
+	// mounted: no setting is Editable, so there is nothing a write could change.
+	s.mux.Handle("GET /settings", servicesettings.Handler(s.settings, "/settings"))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

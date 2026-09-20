@@ -25,6 +25,7 @@ Endpoints (all under `/api/usage`):
 | POST | `/api/usage/limits/refresh?provider=anthropic\|codex` | Force a fresh fetch + persist |
 | POST | `/api/usage/limits/watch` | The usage page is open: read limits on the watched interval for `USAGE_STORE_LIMITS_WATCHER_EXPIRY`. 204. |
 | GET | `/health` | Liveness |
+| GET | `/settings` | Every environment variable the service reads, the value in force and where it came from. `AUTH_STORE_TOKEN` shows only whether it is set. Read-only: there is no `PUT`. |
 
 The limits refresher (`internal/limitsrefresh`) reads each provider every `USAGE_STORE_LIMITS_IDLE_REFRESH_INTERVAL` (15m) and writes a row per (provider, window). While the usage page is open and visible it calls `POST /api/usage/limits/watch` about once a minute, and reads speed up to every `USAGE_STORE_LIMITS_WATCHED_REFRESH_INTERVAL` (2m) until `USAGE_STORE_LIMITS_WATCHER_EXPIRY` (3m) passes without a call. Anthropic's usage endpoint shares its rate limit with every Claude Code process on the login, which is why nothing polls it faster. A failed read waits one watched interval, doubling on each further failure up to the idle interval; a success clears it.
 
@@ -40,6 +41,11 @@ The limits refresher (`internal/limitsrefresh`) reads each provider every `USAGE
 | `USAGE_STORE_LIMITS_WATCHER_EXPIRY` | `3m` |
 | `USAGE_STORE_CODEX_COMMAND` | unset (codex limits off) |
 | `USAGE_STORE_CODEX_TIMEOUT` | `30s` |
+| `USAGE_STORE_SPEND_REFRESH_INTERVAL` | `1h` |
+| `AUTH_STORE_URL` | `http://127.0.0.1:8303` |
+| `AUTH_STORE_TOKEN` | unset (spend collection off) |
+
+They are declared once, in `internal/config` with `llm-bridge/servicesettings`, and `GET /settings` serves the list. The service refuses to start on an interval or timeout that is not a Go duration, and on a set variable that starts `USAGE_STORE_LISTEN`, `_DB`, `_TOKENS`, `_LIMITS`, `_CODEX` or `_SPEND` and is not in this table: that is a misspelling. `USAGE_STORE_URL`, which other services use to find this one, is not refused. A test fails on any `os.Getenv` the declarations do not name.
 
 ### Deploy
 

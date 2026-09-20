@@ -39,7 +39,7 @@ Spend is off unless `AUTH_STORE_TOKEN` is set. On this host it is set in the hos
 
 ## Settings
 
-`internal/config` reads plain environment variables with `os.Getenv`; it does not use `llm-bridge/servicesettings` yet, so this service has no `/settings` route (noteboard todo `0554d4f2-2a8a-4c82-85ed-fdab3d212988`). ⚠️ `envDur` drops a duration it cannot parse and uses the default without a word, so a typo in a unit file changes nothing and logs nothing. Check the start-up line after you change an interval.
+`internal/config` declares every environment variable once with `llm-bridge/servicesettings`, `main` reads its configuration from that registry, and `GET /settings` serves it: ungated like every other route, read-only, with `AUTH_STORE_TOKEN` shown only as set or unset. To add a variable, add its `Definition` there; a test fails on any `os.Getenv` the declarations do not name. The service refuses to start on a duration that does not parse, and on a set variable under an owned prefix that nobody declared. The owned prefixes stop short of `USAGE_STORE_` because `USAGE_STORE_URL` is how other services find this one. `deploy.sh` builds the registry from the running service's environment before it stops it. The build reads `../llm-bridge` through a `replace`, so the deploy gate checks that tree too.
 
 # Working in this repo
 
