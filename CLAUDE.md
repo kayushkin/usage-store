@@ -47,7 +47,7 @@ Spend is off unless `AUTH_STORE_TOKEN` is set. On this host it is set in the hos
 
 `go build ./... && go vet ./... && go test ./...` — green on `main` on 2026-09-20. `scripts/e2e-smoke.sh` builds the server, boots it on a temp port against temp databases with `HOME` pointed away, and calls every route; run it after you add or change a route, because a clashing `ServeMux` pattern compiles and then panics at start. Put the mise shims on `PATH` for Go: `export PATH="$HOME/.local/share/mise/shims:$PATH"`.
 
-Deploy with `./deploy.sh` from the main clone, on a clean, pushed `main`. ⚠️ On 2026-09-20 this `deploy.sh` did **not** call `~/bin/deploy-gate`, so nothing stops a deploy from a side branch and the ledger has no row for this repo. Run `deploy-gate status` yourself first and do not deploy if it says the tree is unfit. The script also stops the service before it copies the binary, so a failed start leaves the usage page and the autoworker's limit check down until you fix it.
+Deploy with `./deploy.sh` from the main clone, on a clean, pushed `main`; it runs the shared deploy gate first and records the deploy in repo-store's ledger last. The gate was added on 2026-09-20 and no deploy has run since, so the ledger has no row for this repo yet and the running binary's commit is not recorded anywhere. The script stops the service before it copies the binary, so a failed start leaves the usage page and the autoworker's limit check down until you fix it.
 
 ## Parked branches
 
