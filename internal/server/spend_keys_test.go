@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kayushkin/llm-bridge/servicesettings"
 	usagestore "github.com/kayushkin/usage-store"
+	"github.com/kayushkin/usage-store/internal/config"
 	"github.com/kayushkin/usage-store/spend"
 )
 
@@ -26,7 +28,7 @@ func newSpendServer(t *testing.T) (*Server, *usagestore.Store) {
 		t.Fatalf("Open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	return New(store, filepath.Join(t.TempDir(), "tokens.db"), nil, nil, SpendCollectors{}), store
+	return New(store, filepath.Join(t.TempDir(), "tokens.db"), nil, nil, nil, time.Hour, SpendCollectors{}, emptySettingsRegistry(t)), store
 }
 
 // newConfiguredSpendServer carries a non-nil Anthropic collector, which is the
@@ -39,7 +41,18 @@ func newConfiguredSpendServer(t *testing.T) (*Server, *usagestore.Store) {
 	}
 	t.Cleanup(func() { store.Close() })
 	collectors := SpendCollectors{Anthropic: &spend.AnthropicKeyCollector{}}
-	return New(store, filepath.Join(t.TempDir(), "tokens.db"), nil, nil, collectors), store
+	return New(store, filepath.Join(t.TempDir(), "tokens.db"), nil, nil, nil, time.Hour, collectors, emptySettingsRegistry(t)), store
+}
+
+// emptySettingsRegistry is the registry New requires, built from an empty
+// environment: these tests exercise spend, not configuration.
+func emptySettingsRegistry(t *testing.T) *servicesettings.Registry {
+	t.Helper()
+	registry, err := config.NewSettingsRegistry(servicesettings.MapEnvironment(map[string]string{}))
+	if err != nil {
+		t.Fatalf("settings registry: %v", err)
+	}
+	return registry
 }
 
 func daysAgoDate(n int) string {
