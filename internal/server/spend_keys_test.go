@@ -126,7 +126,7 @@ func TestSpendKeysReportsAnthropicConfiguredOnlyWhenACollectorExists(t *testing.
 
 func TestSpendKeysReportsOpenAIUnconfiguredEvenWithAnAnthropicCollector(t *testing.T) {
 	// There is no OpenAI collector at all yet. The flag must not track its
-	// neighbour, or the page offers a refresh nothing implements.
+	// neighbor, or the page offers a refresh nothing implements.
 	srv, _ := newConfiguredSpendServer(t)
 	if getSpendKeys(t, srv).OpenAI.Configured {
 		t.Fatal("openai reports configured off the back of anthropic's collector")

@@ -104,7 +104,7 @@ func TestDailyFromBuckets_LongButUnparseableStartingAtIsRefused(t *testing.T) {
 // from UTC midnights, but the byte cut took whatever day the string happened to
 // be written in. An offset timestamp late in the day therefore landed on the
 // wrong row entirely.
-func TestDailyFromBuckets_OffsetTimestampIsNormalisedToItsUTCDay(t *testing.T) {
+func TestDailyFromBuckets_OffsetTimestampIsNormalizedToItsUTCDay(t *testing.T) {
 	daily, err := dailyFromBuckets([]rawUsageBucket{
 		bucket("2026-08-01T23:30:00-08:00", sonnet("apikey_a", 1_000_000)),
 	}, 1700000000, nil)

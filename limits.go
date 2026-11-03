@@ -13,7 +13,7 @@ import (
 //   - Anthropic /api/oauth/usage (utilization 0-100, resets_at ISO string)
 //   - Codex app-server rate limits (usedPercent 0-100, windowDurationMins, resetsAt unix sec)
 //
-// Both shapes are normalised here. ResetsAt is always unix seconds.
+// Both shapes are normalized here. ResetsAt is always unix seconds.
 type LimitWindow struct {
 	UsedPercent   float64 `json:"used_percent"`
 	WindowMinutes *int64  `json:"window_minutes,omitempty"`

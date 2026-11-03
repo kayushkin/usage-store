@@ -13,7 +13,7 @@ import "unicode/utf8"
 // schema.SuffixAtRuneBoundary; usage-store keeps a package-local copy rather
 // than importing tool-store, because a 20-line helper is not worth a module
 // edge from the spend collector to the tool registry. The names and the
-// behaviour are the canonical ones so the copies cannot drift apart silently.
+// behavior are the canonical ones so the copies cannot drift apart silently.
 //
 // The walk costs at most three byte comparisons and allocates nothing, which is
 // why it is preferred here over converting to []rune.

@@ -98,7 +98,7 @@ func LoadCredentials() (*Credentials, error) {
 	}, nil
 }
 
-// Collector fetches and normalises Anthropic subscription limits.
+// Collector fetches and normalizes Anthropic subscription limits.
 type Collector struct {
 	HTTPClient *http.Client
 }
@@ -108,7 +108,7 @@ func New() *Collector {
 	return &Collector{HTTPClient: &http.Client{Timeout: 10 * time.Second}}
 }
 
-// Fetch hits Anthropic's OAuth usage endpoint and returns a normalised snapshot
+// Fetch hits Anthropic's OAuth usage endpoint and returns a normalized snapshot
 // alongside the raw response body (for storage / debugging).
 func (c *Collector) Fetch() (*usagestore.ProviderLimits, []byte, error) {
 	creds, err := LoadCredentials()

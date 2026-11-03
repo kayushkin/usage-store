@@ -440,7 +440,7 @@ def problems(results):
             found.append("the known-positive control was NOT caught — the suite is not running")
         if case.name.startswith("CONTROL known-negative") and verdict == "CAUGHT":
             found.append("the known-negative control WAS caught — the suite is red for a "
-                         "reason unrelated to behaviour, so every CAUGHT above is suspect")
+                         "reason unrelated to behavior, so every CAUGHT above is suspect")
         if verdict == "compile error" and not case.expected_unnoticed:
             found.append("compile error, not a score: %s" % case.name)
         if verdict == "UNNOTICED" and not case.expected_unnoticed:
@@ -468,7 +468,7 @@ def score(targets, packages, cases, unreddened=None):
     file the engine happened to look at first.
 
     Pass --diffs to print the edit each case actually applied. A row prints the
-    name you gave it, not the edit you made, and mislabelled cases have twice
+    name you gave it, not the edit you made, and mislabeled cases have twice
     been read as coverage holes that were not there — so read the diffs at
     least once per case family.
 

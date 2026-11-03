@@ -10,7 +10,7 @@ import (
 // jsonEscapedReplacementChar is what encoding/json actually writes for an
 // invalid UTF-8 byte: the six ASCII characters of the \ufffd escape, NOT the
 // encoded U+FFFD rune. Spelled as two raw literals so the distinction survives
-// an editor that would otherwise normalise one into the other. The obvious
+// an editor that would otherwise normalize one into the other. The obvious
 // assertion — strings.ContainsRune(body, utf8.RuneError) — cannot fail on
 // marshalled JSON, so it reads as coverage and is not.
 const jsonEscapedReplacementChar = `\u` + `fffd`

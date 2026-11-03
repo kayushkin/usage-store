@@ -50,15 +50,15 @@ func TestExchangeFailsWhenOutputEndsEarly(t *testing.T) {
 	}
 }
 
-func TestNormaliseKeysWindowsByLength(t *testing.T) {
+func TestNormalizeKeysWindowsByLength(t *testing.T) {
 	plan := "plus"
-	out, err := normalise(&rateLimitSnapshot{
+	out, err := normalize(&rateLimitSnapshot{
 		Primary:   &rateLimitWindow{UsedPercent: 93, WindowDurationMins: i64(300), ResetsAt: i64(1789595486)},
 		Secondary: &rateLimitWindow{UsedPercent: 30, WindowDurationMins: i64(10080), ResetsAt: i64(1790014681)},
 		PlanType:  &plan,
 	}, time.Unix(1789593820, 0))
 	if err != nil {
-		t.Fatalf("normalise: %v", err)
+		t.Fatalf("normalize: %v", err)
 	}
 	if out.Source != SourceAppServer || out.PlanType != "plus" || out.SnapshotAt != 1789593820 {
 		t.Errorf("header = %+v", out)
@@ -72,26 +72,26 @@ func TestNormaliseKeysWindowsByLength(t *testing.T) {
 }
 
 // Two windows with no length must not collapse onto one key.
-func TestNormaliseKeepsBothWindowsWhenNeitherStatesItsLength(t *testing.T) {
-	out, err := normalise(&rateLimitSnapshot{
+func TestNormalizeKeepsBothWindowsWhenNeitherStatesItsLength(t *testing.T) {
+	out, err := normalize(&rateLimitSnapshot{
 		Primary:   &rateLimitWindow{UsedPercent: 11},
 		Secondary: &rateLimitWindow{UsedPercent: 22},
 	}, time.Unix(1000, 0))
 	if err != nil {
-		t.Fatalf("normalise: %v", err)
+		t.Fatalf("normalize: %v", err)
 	}
 	if out.Windows[WindowPrimary].UsedPercent != 11 || out.Windows[WindowSecondary].UsedPercent != 22 {
 		t.Errorf("windows = %+v", out.Windows)
 	}
 }
 
-func TestNormaliseRefusesTwoWindowsOfTheSameLength(t *testing.T) {
-	_, err := normalise(&rateLimitSnapshot{
+func TestNormalizeRefusesTwoWindowsOfTheSameLength(t *testing.T) {
+	_, err := normalize(&rateLimitSnapshot{
 		Primary:   &rateLimitWindow{UsedPercent: 1, WindowDurationMins: i64(300)},
 		Secondary: &rateLimitWindow{UsedPercent: 2, WindowDurationMins: i64(300)},
 	}, time.Unix(1000, 0))
 	if err == nil {
-		t.Fatal("normalise kept one of two five-hour windows silently")
+		t.Fatal("normalize kept one of two five-hour windows silently")
 	}
 }
 

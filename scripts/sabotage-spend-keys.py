@@ -50,7 +50,7 @@ line of any of these twenty-three left `go test ./...` green. Only
 
 The census named ONE of the twenty-three. That is the sixth consecutive row on
 `e9b0b89c` where the function name under-described the mechanism it belongs to,
-and the 222nd's rule — read the row's neighbours before scoping the work to its
+and the 222nd's rule — read the row's neighbors before scoping the work to its
 title — has now not once failed to pay.
 
 ⚠️ Read that measurement on `main`. usage-store's checkout was standing on
@@ -384,7 +384,7 @@ CASES = [
                            "one layer down instead, by the store test that fixes that contract",
     ),
     Case(
-        "a date typed into the form is ignored in favour of now",
+        "a date typed into the form is ignored in favor of now",
         [('	if occurredAt == 0 && req.OccurredAtStr != "" {',
           '	if occurredAt != 0 && req.OccurredAtStr != "" {')],
     ),

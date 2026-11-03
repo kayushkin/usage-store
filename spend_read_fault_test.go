@@ -11,7 +11,7 @@ import (
 )
 
 // A database/sql row iteration can fail AFTER the first row has been handed
-// over: a dropped connection, a corrupt page, a cancelled context. `rows.Next`
+// over: a dropped connection, a corrupt page, a canceled context. `rows.Next`
 // reports that by returning false, exactly as it does at a clean end of
 // results, and the only thing that tells the two apart is `rows.Err()`.
 //

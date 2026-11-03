@@ -132,7 +132,7 @@ func (r *Reader) Read(ctx context.Context) (*usagestore.ProviderLimits, []byte, 
 	if result.RateLimits == nil {
 		return nil, nil, fmt.Errorf("account/rateLimits/read returned no rateLimits: %s", raw)
 	}
-	out, err := normalise(result.RateLimits, time.Now())
+	out, err := normalize(result.RateLimits, time.Now())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -223,12 +223,12 @@ func stderrSuffix(stderr *bytes.Buffer) string {
 	return "; stderr: " + text
 }
 
-// normalise maps the CLI's primary/secondary windows onto stable keys.
+// normalize maps the CLI's primary/secondary windows onto stable keys.
 //
 // It fails rather than let one window overwrite another: two windows sharing a key
 // means the snapshot contradicts itself, and keeping the last one would report one
 // limit where the provider stated two.
-func normalise(snap *rateLimitSnapshot, fetchedAt time.Time) (*usagestore.ProviderLimits, error) {
+func normalize(snap *rateLimitSnapshot, fetchedAt time.Time) (*usagestore.ProviderLimits, error) {
 	out := &usagestore.ProviderLimits{
 		Provider:   "codex",
 		SnapshotAt: fetchedAt.Unix(),
